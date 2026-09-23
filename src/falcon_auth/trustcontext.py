@@ -28,7 +28,7 @@ The convention's replacement for a TTL is revalidation -- `grant_epoch` on the g
 (Q121). With no way to revalidate cheaply, the only conformant option left is to not serve
 assurance from cache, so there is no warm read path here at all. Every resolve reaches the source.
 
-⚠ THE COST, recorded rather than hidden: routine reads that previously served from a warm cache
+THE COST, recorded rather than hidden: routine reads that previously served from a warm cache
 now call auth on every request. That is a real load increase on the trust source, and it is what
 the convention asks for. The field-split cache returns the day auth ships `grant_epoch` + `ETag`,
 at which point the warm path becomes a conditional request rather than a timer.

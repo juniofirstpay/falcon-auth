@@ -88,7 +88,9 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 | `entitlement/` | resolver · enforcer · the capability gate |
 | `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, one method per plane |
 
-**Still owed:** the C-038 casbin work — the `g` layer, the any-of capability registry, the flatness lint, the per-grant first-match loop — and dropping the blanket trust TTL.
+**C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
+
+**Still owed:** nothing in the package until auth emits grants. The expansion stays empty and the grant register stays empty until it does — by design, not by omission.
 
 ---
 

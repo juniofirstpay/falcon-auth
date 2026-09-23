@@ -162,7 +162,7 @@ def build_enforcer(
 ) -> CapabilityEnforcer:
     """Build the gate from a service's capability registry. In-memory: no adapter, no policy file.
 
-    ⛔ No policy adapter, deliberately (RUL-075): a change to who may reach a route is a DEPLOY,
+    No policy adapter, deliberately (RUL-075): a change to who may reach a route is a DEPLOY,
     reviewable in a diff, never a row someone edits in a datastore while the service is running.
 
     :param registry: capability -> the entitlements that open it, any-of (RUL-073). Each
@@ -192,19 +192,18 @@ def build_enforcer(
 
 
 # ---------------------------------------------------------------------------------------------
-# C-038 CONFORMANCE, OWED (Phase C) -- recorded here so the gap is visible at the code, not only
-# in a register. This module is a faithful port of what runs in two services today; the
-# convention that reshapes it was ratified after it was written.
+# C-038 CONFORMANCE -- complete. This module was a faithful port of what runs in two services
+# today, and the convention that reshapes it was ratified after it was written. What landed:
 #
-#   Flatness lint          `g` is transitive in casbin to maxHierarchyLevel and cannot express
-#                          flatness itself, so a build-time lint must reject any name appearing
-#                          on both sides of a row
+#   MODEL_TEXT             the platform artifact verbatim, two-layer form
+#   Registry               capability -> an ANY-OF list of entitlements (RUL-073)
+#   The `g` layer          the expansion is policy data, passed as build_enforcer(expansion=...)
+#   Per-grant evaluation   opened_by() records WHICH subject opened the route (RUL-076)
+#   Flatness lint          falcon_auth.entitlement.flatness -- `g` is transitive and cannot
+#                          express flatness itself, so it is checked from outside
+#   Grant register         flatness.check_grants_registered -- an unlisted grant refuses boot
 #
-#   Grant register         every `g` row's grant must be listed in registry/GRANTS.md, and an
-#                          unregistered grant must REFUSE BOOT -- never resolve to "holds
-#                          nothing" and continue
-#
-# Adoption is non-breaking: `Enforce(entitlement, capability)` keeps answering identically once
-# `g` rows exist, because casbin's default role manager counts `name1 == name2` as a link. So
-# the two layers can land before auth emits a single grant.
+# Adoption was non-breaking: `Enforce(entitlement, capability)` keeps answering identically once
+# `g` rows exist, because casbin's default role manager counts `name1 == name2` as a link. The
+# two layers landed before auth emits a single grant, and the expansion is empty until it does.
 # ---------------------------------------------------------------------------------------------

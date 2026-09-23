@@ -29,7 +29,21 @@ The error vocabulary lives at the package root: `trustcontext` raises two of the
 
 from __future__ import annotations
 
-from .enforcer import MODEL_TEXT, CapabilityEnforcer, build_enforcer
+from .flatness import (
+    FlatnessError,
+    PolicyError,
+    UnregisteredGrant,
+    check_flatness,
+    check_grants_registered,
+    verify_policy,
+)
+from .enforcer import (
+    MODEL_TEXT,
+    CapabilityEnforcer,
+    Registry,
+    build_enforcer,
+    normalise_registry,
+)
 from .resolver import (
     AuthenticatedUser,
     AuthServiceResolver,
@@ -38,11 +52,19 @@ from .resolver import (
 )
 
 __all__ = (
-    "AuthServiceResolver",
     "AuthenticatedUser",
+    "AuthServiceResolver",
+    "build_enforcer",
     "CapabilityEnforcer",
+    "check_flatness",
+    "check_grants_registered",
+    "FlatnessError",
     "GrantAllResolver",
     "MODEL_TEXT",
+    "normalise_registry",
+    "PolicyError",
+    "Registry",
     "Resolver",
-    "build_enforcer",
+    "UnregisteredGrant",
+    "verify_policy",
 )
