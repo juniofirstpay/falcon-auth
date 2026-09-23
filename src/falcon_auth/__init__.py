@@ -8,7 +8,7 @@ Four parts, one question: **may this caller do this?**
     entitlement/   what class of thing may this principal do
 
 Three modules sit above the parts because they are the shared vocabulary the package exists
-to unify — ⛔ none of them ever moves inside a part:
+to unify — none of them ever moves inside a part:
 
     planes.py          the four planes, the registry, and the mount that records them
     principal.py       one principal model, both planes
@@ -19,7 +19,7 @@ to unify — ⛔ none of them ever moves inside a part:
 `entitlement/` decides. A guard test asserts the import direction, because packaging is no
 longer holding that line.
 
-⛔ **Out of scope, permanently.** Ownership ("is this *their* object") and domain ("does the
+**Out of scope, permanently.** Ownership ("is this *their* object") and domain ("does the
 object's state permit it") stay with the owning service: only it holds the data, and any answer
 computed elsewhere is stale by the time it is used.
 

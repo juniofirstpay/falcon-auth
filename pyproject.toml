@@ -32,7 +32,7 @@ dependencies = [
   "pyjwt >= 2.9",
   "aiohttp >= 3.9",
   "structlog",
-  # ⛔ Mandated, not chosen. C-038 (platform conventions, release v18) makes casbin a
+  # Mandated, not chosen. C-038 (platform conventions, release v18) makes casbin a
   # stack element and its model text a platform artifact (registry/AUTHZ-MODEL.md).
   "casbin >= 1.43",
 ]

@@ -14,7 +14,7 @@ Register it like any other authenticator::
 **On the** ``scheme`` **argument.** It is the literal token that must precede the
 credential in the header -- ``Authorization: <scheme> <token>`` -- matched
 case-insensitively. Passing ``scheme="DPoP"`` means the string ``DPoP`` is what
-this authenticator looks for. ⚠️ It does **not** implement RFC 9449: no proof
+this authenticator looks for. It does **not** implement RFC 9449: no proof
 JWT is parsed, no ``cnf``/``jkt`` thumbprint is bound, nothing ties the token to
 a client key. A token accepted here is a **bearer** credential, replayable by
 whoever holds it until ``exp``. Stated plainly because the opposite assumption is

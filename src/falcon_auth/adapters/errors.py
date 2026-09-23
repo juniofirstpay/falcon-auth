@@ -1,6 +1,6 @@
 """Falcon error rendering for this package's exceptions.
 
-⭐ One handler registration, called once at boot. As further parts land their error types
+One handler registration, called once at boot. As further parts land their error types
 register here too, so a consuming service plumbs the whole package's wire format in one line.
 """
 

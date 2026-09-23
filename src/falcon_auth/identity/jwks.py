@@ -247,7 +247,7 @@ class JWKSVerifier:
     against the configured values.
 
     :param forwarded_claims: the allowlist of claim names permitted onto the principal.
-        ⛔ **Required, with no default**, and the reason is the whole point of it.
+        **Required, with no default**, and the reason is the whole point of it.
 
         The naive form is ``user_cls(id=claims.get("sub"), type="user", **claims)`` --
         every claim in the token, splatted onto the user. That object is read to make
@@ -263,19 +263,19 @@ class JWKSVerifier:
         carry an ``id`` or ``type`` claim from being silently rejected for the same
         reason.
 
-        ⛔ **No default here, deliberately.** The correct value is whatever the
+        **No default here, deliberately.** The correct value is whatever the
         consumer's authorization layer looks sessions up by -- typically its own
         ``DEFAULT_SESSION_CLAIM``. Defaulting it would put an authorization fact inside
         this package and leave one constant defined on both sides of the seam, which
         must then silently agree.
 
-        ⛔ **Never source it from configuration.** A settings key for "which token
+        **Never source it from configuration.** A settings key for "which token
         claims may influence authorization" is one edit away from being no allowlist at
         all. It is a constructor argument -- code, reviewed in a pull request -- or
         nothing. Omitting it is a ``TypeError`` at construction, not a 401 storm in
         production.
 
-        ⭐ ``sub`` is not forwarded even when listed: it is read explicitly as ``id=``,
+        ``sub`` is not forwarded even when listed: it is read explicitly as ``id=``,
         so forwarding it too would collide with that keyword.
     """
 

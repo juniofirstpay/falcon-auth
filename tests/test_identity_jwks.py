@@ -121,7 +121,7 @@ def test_sub_is_never_forwarded():
 
 
 def test_forwarded_claims_is_required():
-    """⛔ No default, deliberately.
+    """No default, deliberately.
 
     The correct value is whatever the consumer's authorization layer looks sessions up
     by. Defaulting it would put an authorization fact inside this package and leave one
