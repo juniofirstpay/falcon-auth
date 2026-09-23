@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src/"]
+include = [
+  "falcon_auth",
+  "falcon_auth.eastwest",
+  "falcon_auth.identity",
+  "falcon_auth.assurance",
+  "falcon_auth.entitlement",
+  "falcon_auth.adapters",
+]
+
+[project]
+name = "falcon-auth"
+version = "0.1.0"
+authors = [{ name = "Nirbhay Gupta", email = "nirbhay.gupta@junio.in" }]
+description = "Every post-transport trust decision a Falcon service makes: east-west mTLS identity, token authentication, session assurance, and entitlement."
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "falcon >= 4.0",
+  "uvicorn >= 0.30",
+  "cryptography >= 42",
+  "pyjwt >= 2.9",
+  "aiohttp >= 3.9",
+  "structlog",
+  # ⛔ Mandated, not chosen. C-038 (platform conventions, release v18) makes casbin a
+  # stack element and its model text a platform artifact (registry/AUTHZ-MODEL.md).
+  "casbin >= 1.43",
+]
+
+[project.optional-dependencies]
+dev = ["pytest >= 8", "pytest-asyncio >= 0.24"]
+
+[tool.pytest.ini_options]
+addopts = "-rSA"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/falcon_auth"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+ignore_missing_imports = true
+strict = true
+exclude = "(_test\\.py$|test_.*\\.py$|/tests/)"
