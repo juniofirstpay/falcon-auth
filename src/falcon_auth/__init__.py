@@ -39,7 +39,7 @@ __version__ = "0.1.0"
 # implementation detail, except `adapters`, which consumers import directly for the
 # Falcon integration.
 #
-# Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a).
+# Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a) · assurance (B1).
 from .eastwest import (
     KIND_CALLBACK,
     KIND_SERVICE,
@@ -62,6 +62,7 @@ from .errors import (
     AuthzUnavailable,
     CapabilityDenied,
     SessionMiss,
+    StepUpRequired,
     Unauthenticated,
 )
 from .trustcontext import (
@@ -78,6 +79,7 @@ from .trustcontext import (
     TrustContextCache,
     TrustContextClient,
 )
+from .assurance import check_session_elevated
 from .identity import (
     DEFAULT_DECODE_OPTIONS,
     InvalidToken,
@@ -113,6 +115,7 @@ __all__ = (
     "SESSION_TRUST_AUTHENTICATED",
     "SESSION_TRUST_ELEVATED",
     "SessionMiss",
+    "StepUpRequired",
     "SvcPlaneError",
     "SvcPlaneErrorCodes",
     "TrustContext",
@@ -122,6 +125,7 @@ __all__ = (
     "UnknownCNError",
     "Verifier",
     "__version__",
+    "check_session_elevated",
     "build_allow_list",
     "build_uvicorn_ssl_kwargs",
     "peer_cn",

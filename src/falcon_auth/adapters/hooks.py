@@ -34,7 +34,9 @@ from typing import Any, Awaitable, Callable
 import falcon
 import falcon.asgi
 
+from ..assurance.stepup import check_session_elevated
 from ..eastwest.verifier import Principal, Verifier
+from ..trustcontext import TrustContextClient
 
 
 _PRINCIPAL_CTX_ATTR = "eastwest_principal"
@@ -93,9 +95,56 @@ def principal_from_request(req: falcon.asgi.Request) -> Principal | None:
     return getattr(req.context, _PRINCIPAL_CTX_ATTR, None)
 
 
+#: How a service finds the two references on a request. The package cannot know this: the
+#: session claim lands wherever that service's authenticator put it, which is a consumer
+#: convention, not a fact about auth.
+RefExtractor = Callable[[falcon.asgi.Request], tuple[str, str]]
+
+
+def require_elevated(client: TrustContextClient, refs: RefExtractor) -> HookFn:
+    """Return a Falcon ``before`` hook that gates a route on an ELEVATED session.
+
+    The hook's **presence is the requirement** -- there is no tier argument, because there
+    are two tiers and "authenticated is enough" is expressed by not applying it.
+
+    Apply it **after** the entitlement gate. C-033 makes that ordering load-bearing: a
+    principal who holds no entitlement at all should get a clean refusal, not be sent away to
+    complete a challenge that was never going to help them::
+
+        @falcon.before(require("orders:read"), is_async=True)
+        @falcon.before(require_elevated_for_this_service, is_async=True)
+        async def on_get_object(self, req, resp, order_id): ...
+
+    Raises `StepUpRequired` (the client raises a challenge and retries), `SessionMiss` (the
+    session is gone -- re-authenticate instead), or `AuthzUnavailable` (the lookup failed --
+    a challenge cannot fix that).
+    """
+
+    async def hook(
+        req: falcon.asgi.Request,
+        resp: falcon.asgi.Response,
+        resource: object,
+        params: dict[str, Any],
+        *_a: Any,
+        **_kw: Any,
+    ) -> None:
+        # `*_a, **_kw` absorb what `falcon.before(action, *args, **kwargs)` forwards --
+        # notably the `is_async=True` callers across this ecosystem still pass, believing
+        # Falcon consumes it. Falcon 3 did; Falcon 4 detects hooks automatically and the
+        # parameter is gone, so a strict signature raises TypeError: a 500 on a gated route.
+        # Nothing is read from them on purpose -- a gate that varied with decorator kwargs
+        # would be a second, invisible configuration surface.
+        session_ref, user_ref = refs(req)
+        await check_session_elevated(client, session_ref, user_ref)
+
+    return hook
+
+
 __all__ = (
     "HookFn",
+    "RefExtractor",
     "principal_from_request",
     "require_callback",
+    "require_elevated",
     "require_service_scope",
 )

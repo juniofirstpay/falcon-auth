@@ -15,6 +15,13 @@ Two failure modes stay distinct. `StepUpRequired` means the session is live but 
 Collapsing them sends a user to complete a challenge that cannot help, and charges an
 infrastructure fault to them.
 
-Planned modules:
-    stepup.py    SessionTrust · check_session_elevated · StepUpRequired · TrustContextUnavailable
+The trust tiers and the client live in the package root (`trustcontext`), because
+`entitlement` reads the same response for a different field. This part contributes the
+policy, not a second lookup.
 """
+
+from __future__ import annotations
+
+from .stepup import check_session_elevated
+
+__all__ = ("check_session_elevated",)

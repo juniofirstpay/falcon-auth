@@ -20,6 +20,7 @@ The mapping a host is expected to apply, from the contract's §11.2 denial table
     Unauthenticated   -> 401   no token, or the authn hook never ran
     CapabilityDenied  -> 403   authenticated, lacks the entitlement. Do not retry.
     SessionMiss       -> 403   the session is dead/unknown -- still a DENY, see below
+    StepUpRequired    -> 403   entitled, but the session is not elevated. Retry AFTER a challenge.
     AuthzUnavailable  -> 503   authorization state could not be established. Retry with backoff.
 
 **`SessionMiss` is a denial, not an outage, and the distinction is load-bearing.** §5: *"a dead or
@@ -40,6 +41,7 @@ __all__ = (
     "AuthzUnavailable",
     "CapabilityDenied",
     "SessionMiss",
+    "StepUpRequired",
     "Unauthenticated",
 )
 
@@ -75,3 +77,36 @@ class SessionMiss(CapabilityDenied):
 
 class AuthzUnavailable(AuthzError):
     """Authorization state could not be established -- the trust source is unreachable or misconfigured."""
+
+
+class StepUpRequired(AuthzError):
+    """The session is live and authenticated, but not elevated to the tier this route needs.
+
+    Deliberately NOT a subclass of `CapabilityDenied`, and the contrast with `SessionMiss`
+    is the point. A host that maps `CapabilityDenied` alone renders "you do not have access
+    to this" -- which is wrong here and actively unhelpful: the caller may hold every
+    entitlement the route asks for, and the only thing missing is a recent enough proof of
+    who they are. C-033 keeps the five checks answering separately for exactly this reason,
+    with assurance answering "a challenge, not a denial".
+
+    So a host must map this one explicitly. That is the cost, and it buys a response that
+    tells the client what to do next rather than that it may not.
+
+    `required` and `present` travel on the error so the response body can carry them: the
+    client needs to know which challenge to raise, not merely that it was refused.
+    """
+
+    def __init__(
+        self,
+        description: str | None = None,
+        *,
+        required: int,
+        present: int | None = None,
+        **extras: Any,
+    ) -> None:
+        self.required = required
+        self.present = present
+        extras.setdefault("required_session_trust_level", required)
+        if present is not None:
+            extras.setdefault("session_trust_level", present)
+        super().__init__(description, **extras)
