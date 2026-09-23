@@ -181,7 +181,7 @@ is the reason CA trust alone is not the authorization.
 
 ## Where this sits relative to the plane system
 
-East-west is the SERVICE and CALLBACK half of [`../FLOW.md`](../FLOW.md)'s four planes. The plane
+East-west is the SERVICE and CALLBACK half of [`FLOW.md`](FLOW.md)'s four planes. The plane
 middleware decides *which* credential a route accepts; this decides whether the certificate that
 arrived is one we know and one that may do the thing being asked.
 
