@@ -41,6 +41,8 @@ __version__ = "0.1.0"
 #
 # Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a) · assurance (B1)
 #         · principal + entitlement (A3) · planes (A4).
+#         routing (A4) lives under `adapters`, with the rest of the Falcon-facing surface,
+#         so a bare `import falcon_auth` still does not pull Falcon in.
 # The plane vocabulary. The bare constants (USER, SERVICE, CALLBACK, PUBLIC) are NOT
 # re-exported at top level: `from falcon_auth import SERVICE` reads ambiguously at a call site
 # and collides with names a consumer is likely to have of its own. Import the module and say
