@@ -6,9 +6,9 @@ One question — **may this caller do this?** — answered in four parts that pr
 
 - **Self-contained.** No dependency on `falcon-svcplane`; its logic lives here. Nothing is imported from the `falcon_utils` namespace.
 - **One plane vocabulary, one principal.** The split it replaces defined both twice, in two packages, with different spellings.
-- **Framework-agnostic cores.** Nothing outside `falcon_auth.adapters` imports Falcon. A token string, two reference strings, a raw ASGI scope — each core is exercisable without a web framework.
-- **No transport, no configuration.** The package performs no HTTP and reads no settings. A consumer injects its session getter and passes every value as an argument.
-- **Fail-closed by default.** An empty allow-list denies every east-west route; an unmapped CN gets zero scopes; a capability with no registry row is detectable, because absence must never mean "ungated".
+- **Framework-agnostic cores.** Nothing outside `falcon_auth.adapters` imports Falcon — asserted by `tests/test_no_framework_leak.py`, not merely intended. A token string, two reference strings, a raw ASGI scope — each core is exercisable without a web framework.
+- **No connection, no configuration.** The package owns no connection and reads no settings: it issues the trust-context request, but on a session the host hands it, so certificates, base URL and lifecycle stay with the consumer. Every other value arrives as an argument.
+- **Fail-closed by default.** An empty allow-list denies every east-west route; an unmapped CN gets zero scopes; a route mounted on no plane is refused at boot; a capability with no registry row raises at decoration time, because absence must never mean "ungated".
 
 ---
 
@@ -30,8 +30,8 @@ Pin a `ref`. This package sits on the authorization path of every consuming serv
 |---|---|---|
 | `eastwest/` | is this peer service who its certificate says, and does it hold this scope | `Verifier` · `build_allow_list` · `peer_cn` |
 | `identity/` | who is this user | `JWKSStore` · `JWKSVerifier` |
-| `assurance/` | how strongly, how recently | `SessionTrust` · `check_session_elevated` |
-| `entitlement/` | what class of thing may they do | `AuthServiceResolver` · `CapabilityEnforcer` |
+| `assurance/` | how strongly, how recently | `check_session_elevated` · `StepUpRequired` |
+| `entitlement/` | what class of thing may they do | `AuthServiceResolver` · `CapabilityEnforcer` · `verify_policy` |
 
 Three modules sit above them, because they are the shared vocabulary the package exists to unify — none ever moves inside a part:
 
@@ -43,7 +43,7 @@ Three modules sit above them, because they are the shared vocabulary the package
 
 Two notes on that table, both corrections to an earlier sketch of it:
 
-- **`planes.py` holds the vocabulary, not the route machinery.** `PlaneRegistry` and `mount()` — declaring a route's plane and refusing a mismatch at startup (C-006) — need route and version knowledge and touch Falcon, so they belong in `adapters/` beside the authentication middleware that reads the same map. They are not built yet.
+- **`planes.py` holds the vocabulary, not the route machinery.** `PlaneRegistry`, `mount()` and `verify_app()` — declaring a route's plane and refusing a mismatch at startup (C-006) — need route and version knowledge and are framework-shaped, so they live in `adapters/routing.py` beside the middleware that reads the same map.
 - **There are two principal models, not one.** The east-west `Principal` (`cn` · `kind` · `source` · `scopes`) and the user-plane one (`user_ref` · `entitlements` · session and device trust) share **no field**. Merging them would produce a model where most attributes are `None` on any given request and a handler could not tell which kind it held, so they stay separate and are exported as `Principal` and `UserPrincipal`.
 
 ---
@@ -53,7 +53,7 @@ Two notes on that table, both corrections to an earlier sketch of it:
 > The east-west, identity and assurance parts may **establish** who a caller is and how strongly.
 > They may never **decide** permission. Only `entitlement/` decides.
 
-A guard test asserts the import direction. Packaging used to hold that line; module structure holds it now.
+`tests/test_no_framework_leak.py` asserts the import direction, by AST rather than by grep. Packaging used to hold that line; module structure holds it now.
 
 **Out of scope, permanently:** ownership ("is this *their* object") and domain ("does the object's state permit it"). Only the owning service holds the data to answer them, and any answer computed elsewhere is stale by the time it is used.
 
@@ -77,7 +77,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Six parts landed, 204 tests.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 240 tests.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
@@ -85,8 +85,8 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 | `identity/` | JWKS store, verifier, Falcon authenticator |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the step-up gate |
-| `entitlement/` | resolver · enforcer · the capability gate |
-| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, one method per plane |
+| `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks |
+| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, one method per plane, and the wrong-plane 404 |
 
 **C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
 

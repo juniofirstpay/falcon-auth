@@ -5,9 +5,9 @@ remote JWKS endpoint, with the key selected by the token's ``kid`` header.
 
 **Framework-agnostic on purpose.** :class:`JWKSVerifier` takes a bare token
 *string* and returns claims; it never sees a Falcon ``Request``. The Falcon
-integration lives in :mod:`falcon_utils.auth_v2.authenticators.jwks_authenticator`,
-mirroring how ``falcon-svcplane`` splits its ``Verifier`` (raw ASGI scope) from
-its ``hooks`` module (Falcon adapter).
+integration lives in :mod:`falcon_auth.adapters.authenticators`, mirroring how
+:mod:`falcon_auth.eastwest.verifier` (raw ASGI scope) is split from
+:mod:`falcon_auth.adapters.hooks` (the Falcon adapter).
 
 **Ported from the copy running in two services** (`app/utils/jwks.py`, duplicated
 byte-for-byte apart from two hardenings that had each landed in only one of them).

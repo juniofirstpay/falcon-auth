@@ -10,7 +10,7 @@ the three fail-closed east-west conditions:
 **Hardened by the package** (uniform across every consuming repo):
 
 - ``title`` — the class name string, e.g. ``"UnknownCNError"``
-- ``http_status`` — Falcon HTTP-status literal (``falcon.HTTP_401`` / ``HTTP_403``)
+- ``http_status`` — the HTTP status line, in Falcon's ``"401 Unauthorized"`` form
 - ``description`` — a fixed string (interpolated with the scope name for
   :class:`MissingScopeError`)
 - ``extras`` — the relevant identity/scope key
@@ -37,7 +37,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import falcon
 
 _DEFAULT_MISSING_CERT_CODE = 9000
 _DEFAULT_UNKNOWN_CN_CODE = 9001
@@ -61,6 +60,12 @@ class SvcPlaneErrorCodes:
     missing_cert: int = _DEFAULT_MISSING_CERT_CODE
     unknown_cn: int = _DEFAULT_UNKNOWN_CN_CODE
     missing_scope: int = _DEFAULT_MISSING_SCOPE_CODE
+
+
+# Spelled out rather than imported as ``falcon.HTTP_401``. The constants are plain strings
+# ("401 Unauthorized", "403 Forbidden"), so the import bought a name and nothing else -- and it
+# was the only thing in the package outside ``adapters/`` that pulled Falcon in, which is a
+# property the README states and ``tests/test_no_framework_leak.py`` now enforces.
 
 
 class SvcPlaneError(Exception):
@@ -106,7 +111,7 @@ class MissingClientCertError(SvcPlaneError):
     """
 
     title = "MissingClientCertError"
-    http_status = falcon.HTTP_401
+    http_status = "401 Unauthorized"
     description = "east-west plane requires a client certificate (mTLS)"
 
     def __init__(self, code: int = _DEFAULT_MISSING_CERT_CODE):
@@ -120,7 +125,7 @@ class UnknownCNError(SvcPlaneError):
     """
 
     title = "UnknownCNError"
-    http_status = falcon.HTTP_403
+    http_status = "403 Forbidden"
     description = "certificate CN is not in the allow-list"
 
     def __init__(self, cn: str, code: int = _DEFAULT_UNKNOWN_CN_CODE):
@@ -136,7 +141,7 @@ class MissingScopeError(SvcPlaneError):
     """
 
     title = "MissingScopeError"
-    http_status = falcon.HTTP_403
+    http_status = "403 Forbidden"
     # Description template — instance-level `description` is set at raise-time
     # with the scope name interpolated. Kept as a class attribute for
     # documentation / introspection.

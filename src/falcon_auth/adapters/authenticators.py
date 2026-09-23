@@ -2,9 +2,9 @@
 
 The verification itself lives in :mod:`falcon_auth.identity.jwks`, which never sees a
 Falcon object. This module is the thin part: pull the header, match the
-scheme, hand the token to a :class:`~falcon_utils.auth_v2.jwks.JWKSVerifier`,
-and stash the resulting user on the request context in the shape
-:class:`~falcon_utils.auth_v2.authentication.Authentication` expects.
+scheme, hand the token to a :class:`~falcon_auth.identity.jwks.JWKSVerifier`,
+and stash the resulting user on the request context in the shape the consumer's
+``Authentication`` expects.
 
 Register it like any other authenticator::
 
