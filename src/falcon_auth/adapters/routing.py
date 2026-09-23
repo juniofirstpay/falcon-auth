@@ -127,6 +127,13 @@ class PlaneRegistry:
         """
         self._by_endpoint: dict[tuple[str, str], Registration] = {}
         self._by_class: dict[type, Registration] = {}
+        # The class's API version is tracked SEPARATELY from its pin above, because the pin is
+        # whichever endpoint registered first and that one may carry no version segment at all
+        # (a callback path, say). Reading the version off the pin would then leave it None
+        # forever, and every later version would compare equal to "no version" and pass -- so a
+        # class first mounted unversioned could go on to serve v1 and v2 both. This records the
+        # first version actually seen, whenever it is seen.
+        self._version_by_class: dict[type, str] = {}
         self._allow_dev_routes = allow_dev_routes
 
     @property
@@ -177,12 +184,12 @@ class PlaneRegistry:
                 f"{pinned.endpoint}); refusing to also mount it on {plane}. One resource class "
                 f"serves exactly one plane -- split it into two classes"
             )
-        if pinned is not None and version is not None and pinned.version not in (None, version):
+        held = self._version_by_class.get(resource_type)
+        if version is not None and held is not None and held != version:
             raise PlaneConflict(
-                f"{resource_type.__name__} already serves API version {pinned.version!r} (at "
-                f"{pinned.endpoint}); refusing to also mount it under {version!r}. One class, "
-                f"two contracts, and nothing to notice when a responder is added -- give the "
-                f"new version its own class"
+                f"{resource_type.__name__} already serves API version {held!r}; refusing to "
+                f"also mount it under {version!r}. One class, two contracts, and nothing to "
+                f"notice when a responder is added -- give the new version its own class"
             )
 
         registration = Registration(
@@ -194,6 +201,8 @@ class PlaneRegistry:
         )
         self._by_endpoint[key] = registration
         self._by_class.setdefault(resource_type, registration)
+        if version is not None:
+            self._version_by_class.setdefault(resource_type, version)
         return registration
 
     # -- reading it back ------------------------------------------------------------------

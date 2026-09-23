@@ -128,6 +128,24 @@ def test_one_class_may_not_serve_two_api_versions(registry):
         registry.register(planes.USER, "GET", "/v2/orders", OrdersResource)
 
 
+def test_the_version_rule_survives_an_unversioned_first_mount(registry):
+    """The class pin is whichever endpoint registered FIRST, and that one may carry no version
+    segment. Reading the version off the pin left it None forever, so every later version
+    compared equal to "no version" and passed -- a class first mounted unversioned could then
+    serve v1 and v2 both. The version is tracked separately for exactly this."""
+    registry.register(planes.CALLBACK, "POST", "/webhooks/sms", RefundResource)
+    registry.register(planes.CALLBACK, "POST", "/v1/hooks", RefundResource)
+    with pytest.raises(PlaneConflict, match="already serves API version 'v1'"):
+        registry.register(planes.CALLBACK, "POST", "/v2/hooks", RefundResource)
+
+
+def test_an_unversioned_path_may_sit_beside_a_versioned_one(registry):
+    """No version segment is not a contract claim, so it conflicts with nothing."""
+    registry.register(planes.USER, "GET", "/v1/orders", OrdersResource)
+    registry.register(planes.USER, "GET", "/orders-legacy", OrdersResource)
+    assert len(registry) == 2
+
+
 # ── PUBLIC carries a reason ───────────────────────────────────────────────────
 
 
