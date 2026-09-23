@@ -6,10 +6,11 @@ Three levels, per C-038, and this module is where the first becomes the second:
     entitlement   this service   fine-grained, what a principal holds HERE
     capability    the route      what an endpoint demands -- enforcer.py's business
 
-The feed carries GRANTS. `_compose` expands them into this service's entitlements and
-intersects the result with local state. A service adding or retiring routes changes its own
-entitlements and capabilities and never the grant vocabulary at auth -- that separation is
-the whole reason the middle level exists.
+The feed carries GRANTS, and they travel to the gate as-is. The grant -> entitlement expansion
+is NOT performed here any more: it is `g` rows in the same casbin policy set as the capability
+gate, so one `Enforce(grant, capability)` walks both hops (RUL-075, Q119). A service adding or
+retiring routes changes its own entitlements and capabilities and never the grant vocabulary at
+auth -- that separation is the whole reason the middle level exists.
 
 Entitlements are resolved **server-side**, never read off the token. §4 gives two reasons and the
 second is decisive: a claim the service acts on is authorization data whatever it is named, and if it
@@ -33,19 +34,20 @@ carries its capabilities directly (C-018, C-038 Q93). The two vocabularies never
 is the point: a service account resolving entitlements through the USER-plane resolver is the
 collapse C-033 forbids.
 
-The composition §5 specifies is `expand(granted_roles) ∩ permitted_by(local_subject_state)`. Both
-halves are injected because both are the *host's* knowledge:
+The composition was `expand(granted) ∩ permitted_by(local_subject_state)`. The first half has
+moved; the second stays, and the reason they part company is that only one of them is policy:
 
-- **`expand`** maps the identity provider's coarse vocabulary to the service's fine-grained
-  entitlements. It defaults to pass-through, which is what both services run today.
+- **`expand` is gone from here.** It is `g` rows now -- reviewable data in the policy set, not a
+  hand-written callable (RUL-075). The parameter is still accepted and REFUSES a callable rather
+  than ignoring one, so a host that supplies an expansion is told where it went instead of
+  watching it silently stop applying. Pass the mapping to `build_enforcer(expansion=...)`.
 
-  C-038 OWES A CHANGE HERE (Phase C): the expansion must stop being a hand-written callable
-  and become `g, <grant>, <entitlement>` rows in the SAME casbin policy set as the capability
-  gate -- "no longer hand-written code" (RUL-075). The injection point stays useful for the
-  local veto below; it is the expansion half that moves into the policy.
-- **`veto`** is the local-state intersection -- whether *this service's* record for the subject is
-  active, suspended or closed. A host with no subject aggregate of its own supplies none, and should
-  say so in its build status rather than pretend the layer is enforced.
+- **`veto` stays, and is now the ONLY subtractive lever in the whole model.** Grants compose as
+  a union and are additive-only -- there is no deny effect anywhere in the policy -- so a
+  suspension can never be expressed as a grant or as the absence of one. It is this service's
+  own record of whether the subject is active, suspended or closed. A host with no subject
+  aggregate supplies none, and should say so in its build status rather than pretend the layer
+  is enforced.
 """
 from collections.abc import Callable
 from typing import (
@@ -103,13 +105,19 @@ class AuthServiceResolver:
         client: TrustContextClient,
         cache: TrustContextCache,
         *,
-        expand: Callable[[list[str]], list[str]] | None = None,
+        expand: None = None,
         veto: Callable[[str, list[str]], list[str]] | None = None,
         session_claim: str = DEFAULT_SESSION_CLAIM,
     ) -> None:
+        if expand is not None:
+            raise ValueError(
+                "the grant -> entitlement expansion is no longer a callable (C-038/RUL-075): "
+                "it is `g` rows in the same policy set as the capability gate. Pass the mapping "
+                "to build_enforcer(expansion={grant: [entitlement, ...]}) instead. Refusing "
+                "rather than ignoring, so an expansion that stops applying is not silent"
+            )
         self._client = client
         self._cache = cache
-        self._expand = expand
         self._veto = veto
         self._session_claim = session_claim
 
@@ -139,11 +147,16 @@ class AuthServiceResolver:
             trust_elevated_until=context.trust_elevated_until,
         )
 
-    # ── the §5 composition ───────────────────────────────────────────────────────
+    # ── the composition, now one half ────────────────────────────────────────────
 
     def _compose(self, user_ref: str, granted: list[str]) -> list[str]:
-        expanded = self._expand(granted) if self._expand is not None else granted
-        return self._veto(user_ref, expanded) if self._veto is not None else expanded
+        """The grants, minus whatever this service's own record of the subject removes.
+
+        The expansion half is gone -- it is `g` rows in the policy -- so what the principal
+        carries is the grants themselves, and the gate resolves them. The veto is all that is
+        left to apply here, and it is the only subtractive lever in the model.
+        """
+        return self._veto(user_ref, granted) if self._veto is not None else granted
 
     # ── §10: freshness, and what happens when the source is down ─────────────────
 

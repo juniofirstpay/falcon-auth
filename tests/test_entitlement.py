@@ -161,6 +161,87 @@ def test_no_user_identifier_enters_the_policy():
     assert e.allows_principal(a, "orders:list") == e.allows_principal(b, "orders:list")
 
 
+# ── the g layer: grant -> entitlement -> capability (C1) ──────────────────────
+
+
+def test_a_grant_opens_the_capabilities_of_the_entitlements_it_expands_to():
+    """One Enforce(grant, capability): casbin walks g(grant, entitlement) then matches
+    p(entitlement, capability). The expansion is policy data now, not a callable."""
+    e = build_enforcer(REGISTRY, expansion={"RETAIL_USER": ["ORDER_READ"]})
+    assert e.allows(["RETAIL_USER"], "orders:list")
+    assert not e.allows(["RETAIL_USER"], "orders:create"), "only what it expands to"
+
+
+def test_an_entitlement_still_works_directly_which_is_what_makes_this_non_breaking():
+    """The default role manager counts name1 == name2 as a link, so every existing call site
+    keeps answering identically once g rows exist."""
+    e = build_enforcer(REGISTRY, expansion={"RETAIL_USER": ["ORDER_READ"]})
+    assert e.allows(["ORDER_READ"], "orders:list")
+
+
+def test_no_expansion_is_the_correct_state_today():
+    """Auth emits no grants and the platform register is deliberately empty, so the layer lands
+    inert and the gate answers exactly as it did before it existed."""
+    with_layer = build_enforcer(REGISTRY)
+    riya = Principal(user_ref="riya", entitlements=["ORDER_READ"])
+    assert with_layer.allows_principal(riya, "orders:list")
+
+
+def test_the_model_text_is_the_platform_artifact_two_layer_form():
+    """Casbin is a mandated stack element and this text is a platform artifact, never
+    re-authored per service."""
+    from falcon_auth.entitlement.enforcer import MODEL_TEXT
+
+    assert "[role_definition]" in MODEL_TEXT
+    assert "g = _, _" in MODEL_TEXT
+    assert "m = g(r.sub, p.sub) && r.obj == p.obj" in MODEL_TEXT
+
+
+def test_casbin_chains_a_third_hop_silently():
+    """The reproduction RUL-075 is built on, and the whole reason a build-time lint is required.
+
+    g is transitive to maxHierarchyLevel and CANNOT express flatness itself. A -> B and B -> C
+    means A reaches C's capabilities, with nothing in the engine to object. Exactly two hops is
+    a property the lint must enforce from outside -- see falcon_auth.entitlement.flatness.
+    """
+    chained = build_enforcer({"x:read": "C"}, expansion={"A": ["B"], "B": ["C"]})
+    assert chained.allows(["A"], "x:read"), "three hops, and casbin allowed it"
+
+
+# ── per-grant first match (C4) ────────────────────────────────────────────────
+
+
+def test_opened_by_names_which_subject_opened_the_route():
+    """C-032's audit line needs to record WHICH grant was responsible. A boolean cannot."""
+    e = build_enforcer(REGISTRY, expansion={"RETAIL_USER": ["ORDER_READ"]})
+    assert e.opened_by(["RETAIL_USER"], "orders:list") == "RETAIL_USER"
+
+
+def test_opened_by_is_none_when_nothing_opens_it():
+    e = build_enforcer(REGISTRY)
+    assert e.opened_by(["ORDER_READ"], "orders:create") is None
+
+
+def test_first_match_wins_in_the_callers_order():
+    """Grants compose as a union and the model has no deny effect, so ordering cannot change the
+    VERDICT -- only which of several sufficient subjects is recorded."""
+    e = build_enforcer({**REGISTRY, "txn:read": ["A", "B"]})
+    assert e.opened_by(["A", "B"], "txn:read") == "A"
+    assert e.opened_by(["B", "A"], "txn:read") == "B"
+
+
+def test_allows_and_opened_by_never_disagree():
+    e = build_enforcer({**REGISTRY, "txn:read": ["A", "B"]})
+    for held in (["A"], ["B"], ["A", "B"], ["ORDER_READ"], []):
+        assert e.allows(held, "txn:read") == (e.opened_by(held, "txn:read") is not None)
+
+
+def test_principal_opened_by_is_the_audit_line_form():
+    e = build_enforcer(REGISTRY)
+    riya = Principal(user_ref="riya", entitlements=["ORDER_READ"])
+    assert e.principal_opened_by(riya, "orders:list") == "ORDER_READ"
+
+
 # ── the resolver ──────────────────────────────────────────────────────────────
 
 
@@ -173,25 +254,34 @@ async def test_grants_from_the_feed_become_entitlements():
     assert p.user_ref == "user-1"
 
 
-async def test_expand_maps_coarse_grants_to_local_entitlements():
-    resolver = _resolver(
-        _Client(grants=["RETAIL_USER"]),
-        expand=lambda granted: ["ORDER_READ", "TASK_READ"] if "RETAIL_USER" in granted else [],
-    )
+async def test_supplying_an_expansion_callable_is_refused_not_ignored():
+    """The expansion is `g` rows now (RUL-075). Refusing beats ignoring: a host whose expansion
+    silently stopped applying would keep resolving callers to the coarse vocabulary and only
+    find out from a denial."""
+    with pytest.raises(ValueError, match="no longer a callable"):
+        _resolver(_Client(grants=["RETAIL_USER"]), expand=lambda g: ["ORDER_READ"])
+
+
+async def test_the_expansion_now_happens_in_the_policy():
+    """What the resolver produces is the grants; the gate walks grant -> entitlement ->
+    capability in one call."""
+    resolver = _resolver(_Client(grants=["RETAIL_USER"]))
     p = await resolver.resolve(_User(sid="sess-1"))
-    assert p.entitlements == ["ORDER_READ", "TASK_READ"]
+    assert p.entitlements == ["RETAIL_USER"]
+
+    gate = build_enforcer(REGISTRY, expansion={"RETAIL_USER": ["ORDER_READ"]})
+    assert gate.allows_principal(p, "orders:list")
 
 
 async def test_the_local_veto_is_the_only_subtractive_lever():
     """Grants are additive only -- the model has no deny effect -- so a suspension can never
     be expressed as a grant. The service's own state is what removes access."""
     resolver = _resolver(
-        _Client(grants=["RETAIL_USER"]),
-        expand=lambda g: ["ORDER_READ", "ORDER_CREATE"],
-        veto=lambda user_ref, ents: [e for e in ents if e != "ORDER_CREATE"],
+        _Client(grants=["RETAIL_USER", "MERCHANT_USER"]),
+        veto=lambda user_ref, held: [g for g in held if g != "MERCHANT_USER"],
     )
     p = await resolver.resolve(_User(sid="sess-1"))
-    assert p.entitlements == ["ORDER_READ"], "suspended for writes, locally"
+    assert p.entitlements == ["RETAIL_USER"], "suspended for the merchant grant, locally"
 
 
 async def test_a_token_with_no_session_claim_is_denied():
