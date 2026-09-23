@@ -250,11 +250,18 @@ class JWKSVerifier:
         **Required, with no default**, and the reason is the whole point of it.
 
         The naive form is ``user_cls(id=claims.get("sub"), type="user", **claims)`` --
-        every claim in the token, splatted onto the user. That object is read to make
-        authorization decisions: a resolver branching on ``user.type``, and for a
-        service-account principal taking entitlements from ``user.get("entitlements")``.
-        A token carrying those claims would then be proposing its own grants -- and
-        grants that ride a token make revocation mean token lifetime.
+        every claim in the token, splatted onto the user. That object is then read to
+        make authorization decisions, so a token carrying the right claim names would be
+        proposing its own grants -- and grants that ride a token make revocation mean
+        token lifetime.
+
+        That is not hypothetical. The resolver this package was ported from branched on
+        ``user.type``, and on one branch read a principal's entitlements straight out of
+        ``user.get("entitlements")``. A token with ``type="service-account"`` and an
+        ``entitlements`` claim would have walked that path. The branch has since been
+        removed (see :mod:`falcon_auth.entitlement.resolver`), but the allowlist is not
+        removed with it: it is what makes the next such branch unreachable rather than
+        merely absent.
 
         The splat is not usually *reachable*, but only by luck: ``type`` collides with
         the hardcoded ``type="user"`` keyword and raises ``TypeError`` inside the

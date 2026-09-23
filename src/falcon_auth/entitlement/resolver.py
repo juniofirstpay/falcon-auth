@@ -16,10 +16,22 @@ second is decisive: a claim the service acts on is authorization data whatever i
 rides the token then **revocation becomes token lifetime** -- suspend a compromised user and they
 keep transacting until it expires. For a service that moves money that is the wrong failure mode.
 
-Two principal kinds arrive here and only one of them has a session:
+ONE principal kind arrives here: a JWT user, whose grants are looked up at the trust source
+by `sid`.
 
-    JWT user          -> look up the session's grants at the trust source, keyed by `sid`
-    api-key service   -> its grants are its own configuration; there is no session to look up
+REMOVED: a second branch resolved an "api-key service account" whose entitlements came from
+its own configuration. It served an authentication method that does not exist. C-038's set of
+per-plane methods is closed -- JWT on the user plane, mTLS on the service plane, HMAC or a
+one-shot token on callbacks, nothing on public -- and api-key is not among them. Neither
+consuming service registers an api-key authenticator, and orders removed its own: the key
+lived in a committed settings file, so it was baked into the image and present in git history,
+and its single entry held the one entitlement that switches the ownership layer off.
+
+The capability it provided is real and has moved rather than gone. A peer backend reading
+across parties now authenticates by certificate on the SERVICE plane, where the CN allow-list
+carries its capabilities directly (C-018, C-038 Q93). The two vocabularies never meet, which
+is the point: a service account resolving entitlements through the USER-plane resolver is the
+collapse C-033 forbids.
 
 The composition §5 specifies is `expand(granted_roles) ∩ permitted_by(local_subject_state)`. Both
 halves are injected because both are the *host's* knowledge:
@@ -59,7 +71,6 @@ __all__ = ("AuthenticatedUser", "AuthServiceResolver", "GrantAllResolver", "Reso
 logger = get_logger("authz")
 
 DEFAULT_SESSION_CLAIM = "sid"
-DEFAULT_SERVICE_ACCOUNT_TYPE = "service-account"
 
 
 class AuthenticatedUser(Protocol):
@@ -74,6 +85,10 @@ class AuthenticatedUser(Protocol):
     @property
     def type(self) -> Any: ...
     def get(self, key: str) -> Any: ...
+
+    # `type` is part of the object the authenticator builds and is kept here so the Protocol
+    # still describes it -- but NOTHING in this module reads it. The branch that did resolved
+    # an api-key service account, and it is gone; see the module docstring.
 
 
 class Resolver(Protocol):
@@ -91,14 +106,12 @@ class AuthServiceResolver:
         expand: Callable[[list[str]], list[str]] | None = None,
         veto: Callable[[str, list[str]], list[str]] | None = None,
         session_claim: str = DEFAULT_SESSION_CLAIM,
-        service_account_type: str = DEFAULT_SERVICE_ACCOUNT_TYPE,
     ) -> None:
         self._client = client
         self._cache = cache
         self._expand = expand
         self._veto = veto
         self._session_claim = session_claim
-        self._service_account_type = service_account_type
 
     async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
         """Resolve `user` to a `Principal`.
@@ -107,9 +120,6 @@ class AuthServiceResolver:
         a fresh read rather than the cache, and fails closed rather than serving last-good grants.
         The flag is plumbed but nothing sets it until a service fills in its §9.2 registry.
         """
-        if str(user.type) == self._service_account_type:
-            return self._service_account(user)
-
         session_ref = user.get(self._session_claim)
         if not session_ref:
             # No session claim: an identity we cannot ask about. §7 -- fail closed rather than guess.
@@ -118,18 +128,6 @@ class AuthServiceResolver:
 
         context = await self._context(str(session_ref), str(user.id), consequential=consequential)
         return self._principal(context)
-
-    # ── principal kinds ──────────────────────────────────────────────────────────
-
-    def _service_account(self, user: AuthenticatedUser) -> Principal:
-        """An api-key caller. Its grants are its config entry -- it holds no session to resolve.
-
-        The trust fields stay `None`: this principal has no assurance posture, and reporting one
-        would let an assurance rule read a service account as merely "not elevated" rather than
-        "not applicable".
-        """
-        entitlements = list(user.get("entitlements") or [])
-        return Principal(user_ref=str(user.id), entitlements=self._compose(str(user.id), entitlements))
 
     def _principal(self, context: TrustContext) -> Principal:
         return Principal(

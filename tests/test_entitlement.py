@@ -169,13 +169,19 @@ async def test_the_trust_fields_travel_with_the_entitlements():
     assert p.is_elevated is False
 
 
-async def test_a_service_account_has_no_session_and_no_trust_posture():
-    """`None`, not zero: an assurance rule must read "not applicable", never "not elevated"."""
+async def test_a_token_cannot_resolve_as_a_service_account():
+    """The branch that did this is removed.
+
+    It served an authentication method C-038's closed per-plane set does not include, neither
+    consumer registers one, and it was the path the claim allowlist exists to keep unreachable:
+    type="service-account" -> entitlements from the caller -> ORDER_READ_ANY -> ownership off.
+
+    A peer backend reading across parties now authenticates by certificate on the SERVICE
+    plane, where the CN allow-list carries its capabilities.
+    """
     resolver = _resolver()
-    p = await resolver.resolve(_User(type="service-account", entitlements=["ORDER_READ_ANY"]))
-    assert p.entitlements == ["ORDER_READ_ANY"]
-    assert p.session_trust_level is None
-    assert p.device_trust_level is None
+    with pytest.raises(CapabilityDenied):
+        await resolver.resolve(_User(type="service-account", entitlements=["ORDER_READ_ANY"]))
 
 
 async def test_a_consequential_operation_fails_closed_when_the_source_is_down():
