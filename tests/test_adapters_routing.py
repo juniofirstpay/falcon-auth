@@ -249,8 +249,8 @@ def test_verify_app_ignores_falcons_own_405_responders(app, registry):
 def test_probe_paths_are_outside_the_plane_system(app, registry):
     """They answer the platform's probe, not a caller -- so they are exempt rather than PUBLIC.
     PUBLIC would say "a caller may reach this without a credential", a different statement."""
-    app.add_route("/healthz", ProbeResource())
-    app.add_route("/readyz", ProbeResource())
+    app.add_route("/health", ProbeResource())
+    app.add_route("/ready", ProbeResource())
     verify_app(app, registry)
     assert registry.public_routes() == {}
 
@@ -262,8 +262,12 @@ def test_a_service_may_name_its_probes_differently(app, registry):
     verify_app(app, registry, exempt_paths=frozenset({"/-/live"}))
 
 
-def test_the_default_probe_paths_are_the_documented_two():
-    assert DEFAULT_PROBE_PATHS == {"/healthz", "/readyz"}
+def test_the_default_probe_paths_match_what_the_estate_mounts():
+    """`/health` and `/ready`, which is what the Python services actually serve. C-006 names
+    `/healthz` and `/readyz`, but it is describing ledger's Go implementation -- and the default
+    is only a default: `verify_app` takes `exempt_paths`, so a service naming its probes
+    differently overrides in the open."""
+    assert DEFAULT_PROBE_PATHS == {"/health", "/ready"}
 
 
 # ── lookups fail safe ─────────────────────────────────────────────────────────

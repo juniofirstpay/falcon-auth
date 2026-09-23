@@ -59,7 +59,7 @@ __all__ = (
 #: Paths outside the plane system (RUL-033). Passed to :func:`verify_app` rather than consulted
 #: implicitly, so a service that names its probes differently overrides them in the open instead
 #: of discovering that two strings were baked in here.
-DEFAULT_PROBE_PATHS = frozenset({"/healthz", "/readyz"})
+DEFAULT_PROBE_PATHS = frozenset({"/health", "/ready"})
 
 
 class PlaneConflict(RuntimeError):

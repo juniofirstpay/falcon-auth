@@ -77,4 +77,21 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Scaffold.** The structure is in place; the parts land one at a time. See the build order in the design outline — east-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check, identity and entitlement are ports of code already running in two services, and assurance is the only part written from scratch.
+**Six parts landed, 204 tests.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+
+| Landed | |
+|---|---|
+| `eastwest/` | verifier · errors · mtls |
+| `identity/` | JWKS store, verifier, Falcon authenticator |
+| `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
+| `assurance/` | the step-up gate |
+| `entitlement/` | resolver · enforcer · the capability gate |
+| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, one method per plane |
+
+**Still owed:** the C-038 casbin work — the `g` layer, the any-of capability registry, the flatness lint, the per-grant first-match loop — and dropping the blanket trust TTL.
+
+---
+
+## How it runs
+
+[`FLOW.md`](FLOW.md) traces what calls what: the boot sequence, the per-request resolution, every exit and its status code, and the three seams where a consumer's own code is called.
