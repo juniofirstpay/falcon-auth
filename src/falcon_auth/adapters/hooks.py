@@ -35,11 +35,19 @@ import falcon
 import falcon.asgi
 
 from ..assurance.stepup import check_session_elevated
+from ..entitlement.enforcer import CapabilityEnforcer
+from ..entitlement.resolver import Resolver
+from ..errors import CapabilityDenied, Unauthenticated
 from ..eastwest.verifier import Principal, Verifier
 from ..trustcontext import TrustContextClient
 
 
 _PRINCIPAL_CTX_ATTR = "eastwest_principal"
+
+#: Where the resolved USER-plane principal is parked, for the rest of the request. A
+#: separate slot from the east-west one above on purpose: the two models share no field,
+#: so a single slot would leave a handler unable to tell which kind it had been given.
+PRINCIPAL_ATTR = "principal"
 
 
 HookFn = Callable[
@@ -142,9 +150,66 @@ def require_elevated(client: TrustContextClient, refs: RefExtractor) -> HookFn:
 
 __all__ = (
     "HookFn",
+    "PRINCIPAL_ATTR",
     "RefExtractor",
     "principal_from_request",
+    "require",
     "require_callback",
     "require_elevated",
     "require_service_scope",
 )
+
+
+def require(
+    enforcer: CapabilityEnforcer,
+    resolver: Resolver,
+    capability: str,
+    *,
+    consequential: bool = False,
+    user_attr: str = "user",
+) -> HookFn:
+    """Gate a user-plane route on `capability`.
+
+    Raises `ValueError` **at decoration time** -- so at import, with a human watching -- if the
+    capability has no row in the §9.1 registry. A route asking for a capability nobody registered is
+    a wiring bug, and §9.1 is explicit that absence must never quietly mean ungated.
+
+    `consequential` marks an operation for which the entitlement is the control: it forces a fresh
+    trust read and fails closed when the source is down (§10). Nothing sets it until a service fills
+    in its §9.2 registry.
+    """
+    if not enforcer.knows(capability):
+        raise ValueError(
+            f"capability {capability!r} is not in the capability registry -- add a row for it "
+            f"(a new route means a new row; absence must never mean ungated)"
+        )
+
+    async def hook(
+        req: Any, resp: Any, resource: Any, params: dict[str, Any], *_a: Any, **_kw: Any
+    ) -> None:
+        # `*_a, **_kw` are deliberate. `falcon.before(action, *args, **kwargs)` forwards EVERY extra
+        # argument straight to the action — including `is_async=True`, which callers across this
+        # ecosystem pass believing Falcon consumes it. It did in Falcon 3; in Falcon 4 hooks are
+        # detected automatically and the parameter is gone, so it now arrives here as a stray kwarg
+        # and a strict signature raises `TypeError: hook() got an unexpected keyword argument
+        # 'is_async'` — a 500 on a route that should have returned 401/403.
+        #
+        # Absorbing them keeps a hook from failing over how it was decorated rather than what it
+        # decides, which is the same thing `falcon_utils`' authentication hook does. Nothing is read
+        # from them on purpose: a gate that changed behaviour based on decorator kwargs would be a
+        # second, invisible configuration surface.
+        user = getattr(req.context, user_attr, None)
+        if user is None:
+            # The authn hook did not run, or ran and set nothing. Never treat this as "anonymous is
+            # fine" -- an unauthenticated request reaching a gated route is a mounting error.
+            raise Unauthenticated("no authenticated principal on the request")
+
+        principal = await resolver.resolve(user, consequential=consequential)
+        setattr(req.context, PRINCIPAL_ATTR, principal)
+
+        if not enforcer.allows_principal(principal, capability):
+            raise CapabilityDenied(
+                f"missing entitlement for {capability}", capability=capability,
+            )
+
+    return hook

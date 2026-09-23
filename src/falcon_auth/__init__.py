@@ -39,7 +39,8 @@ __version__ = "0.1.0"
 # implementation detail, except `adapters`, which consumers import directly for the
 # Falcon integration.
 #
-# Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a) · assurance (B1).
+# Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a) · assurance (B1)
+#         · principal + entitlement (A3).
 from .eastwest import (
     KIND_CALLBACK,
     KIND_SERVICE,
@@ -80,6 +81,15 @@ from .trustcontext import (
     TrustContextClient,
 )
 from .assurance import check_session_elevated
+from .entitlement import (
+    AuthenticatedUser,
+    AuthServiceResolver,
+    CapabilityEnforcer,
+    GrantAllResolver,
+    Resolver,
+    build_enforcer,
+)
+from .principal import Principal as UserPrincipal
 from .identity import (
     DEFAULT_DECODE_OPTIONS,
     InvalidToken,
@@ -90,14 +100,18 @@ from .identity import (
 
 __all__ = (
     "AllowList",
+    "AuthServiceResolver",
+    "AuthenticatedUser",
     "AuthzError",
     "AuthzUnavailable",
     "Cache",
     "CapabilityDenied",
+    "CapabilityEnforcer",
     "DEFAULT_DECODE_OPTIONS",
     "DEVICE_TRUST_ATTESTED",
     "DEVICE_TRUST_BOUND",
     "DEVICE_TRUST_UNTRUSTED",
+    "GrantAllResolver",
     "HttpTrustContextClient",
     "KIND_CALLBACK",
     "KIND_SERVICE",
@@ -114,6 +128,7 @@ __all__ = (
     "RedisCache",
     "SESSION_TRUST_AUTHENTICATED",
     "SESSION_TRUST_ELEVATED",
+    "Resolver",
     "SessionMiss",
     "StepUpRequired",
     "SvcPlaneError",
@@ -122,11 +137,13 @@ __all__ = (
     "TrustContextCache",
     "TrustContextClient",
     "Unauthenticated",
+    "UserPrincipal",
     "UnknownCNError",
     "Verifier",
     "__version__",
     "check_session_elevated",
     "build_allow_list",
+    "build_enforcer",
     "build_uvicorn_ssl_kwargs",
     "peer_cn",
 )

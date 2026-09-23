@@ -23,8 +23,26 @@ third silently.
 
 **This is the only part that decides.** The others establish.
 
-Planned modules:
-    resolver.py    AuthServiceResolver · GrantAllResolver · Resolver
-    enforcer.py    CapabilityEnforcer · build_enforcer
-    errors.py      Unauthenticated · SessionMiss · CapabilityDenied · AuthzUnavailable
+The error vocabulary lives at the package root: `trustcontext` raises two of them, and
+`SessionMiss` subclasses `CapabilityDenied` in a way that cannot be split across modules.
 """
+
+from __future__ import annotations
+
+from .enforcer import MODEL_TEXT, CapabilityEnforcer, build_enforcer
+from .resolver import (
+    AuthenticatedUser,
+    AuthServiceResolver,
+    GrantAllResolver,
+    Resolver,
+)
+
+__all__ = (
+    "AuthServiceResolver",
+    "AuthenticatedUser",
+    "CapabilityEnforcer",
+    "GrantAllResolver",
+    "MODEL_TEXT",
+    "Resolver",
+    "build_enforcer",
+)

@@ -22,7 +22,8 @@ behaviour-identical port. Making the two families agree is a deliberate later ch
 tidy-up smuggled into the port.
 
 Modules:
-    hooks.py            require_service_scope · require_callback · require_elevated
+    hooks.py            require (entitlement) · require_elevated (assurance)
+                        require_service_scope · require_callback (east-west)
                         principal_from_request
     errors.py           register_error_handlers · render_svcplane_error
     authenticators.py   RemoteJWKSAuthenticator
@@ -36,8 +37,10 @@ from __future__ import annotations
 from .authenticators import RemoteJWKSAuthenticator
 from .errors import register_error_handlers, render_svcplane_error
 from .hooks import (
+    PRINCIPAL_ATTR,
     HookFn,
     RefExtractor,
+    require,
     principal_from_request,
     require_callback,
     require_elevated,
@@ -46,11 +49,13 @@ from .hooks import (
 
 __all__ = (
     "HookFn",
+    "PRINCIPAL_ATTR",
     "RefExtractor",
     "RemoteJWKSAuthenticator",
     "principal_from_request",
     "register_error_handlers",
     "render_svcplane_error",
+    "require",
     "require_callback",
     "require_elevated",
     "require_service_scope",
