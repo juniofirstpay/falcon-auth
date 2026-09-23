@@ -33,13 +33,18 @@ Pin a `ref`. This package sits on the authorization path of every consuming serv
 | `assurance/` | how strongly, how recently | `SessionTrust` · `check_session_elevated` |
 | `entitlement/` | what class of thing may they do | `AuthServiceResolver` · `CapabilityEnforcer` |
 
-Three modules sit above them, because they are the shared vocabulary the package exists to unify — neither ever moves inside a part:
+Three modules sit above them, because they are the shared vocabulary the package exists to unify — none ever moves inside a part:
 
 | Module | Holds |
 |---|---|
-| `planes.py` | `Plane` · `PlaneRegistry` · `mount()` — one plane per endpoint, refused at startup |
-| `principal.py` | one principal model, both planes |
+| `planes.py` | `Plane` · `Method` · `METHODS_BY_PLANE` · `PLANE_BY_METHOD` — the four planes and the one method each authenticates |
+| `principal.py` | the user-plane principal (`UserPrincipal` at the package root) |
 | `trustcontext.py` | **one** call to auth, read by both assurance and entitlement |
+
+Two notes on that table, both corrections to an earlier sketch of it:
+
+- **`planes.py` holds the vocabulary, not the route machinery.** `PlaneRegistry` and `mount()` — declaring a route's plane and refusing a mismatch at startup (C-006) — need route and version knowledge and touch Falcon, so they belong in `adapters/` beside the authentication middleware that reads the same map. They are not built yet.
+- **There are two principal models, not one.** The east-west `Principal` (`cn` · `kind` · `source` · `scopes`) and the user-plane one (`user_ref` · `entitlements` · session and device trust) share **no field**. Merging them would produce a model where most attributes are `None` on any given request and a handler could not tell which kind it held, so they stay separate and are exported as `Principal` and `UserPrincipal`.
 
 ---
 

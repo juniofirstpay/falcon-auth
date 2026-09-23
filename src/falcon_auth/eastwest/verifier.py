@@ -27,11 +27,17 @@ integration lives in :mod:`falcon_auth.adapters.hooks`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
+from ..planes import (
+    CALLBACK,
+    EAST_WEST_KINDS,
+    SERVICE,
+    EastWestKind,
+)
 from .errors import (
     MissingClientCertError,
     MissingScopeError,
@@ -40,10 +46,12 @@ from .errors import (
 )
 
 
-# ``Kind`` values are the string literals stored on :class:`Principal`
-# consumers write in their allow-list config.
-KIND_SERVICE = "SERVICE"
-KIND_CALLBACK = "CALLBACK"
+# The ``kind`` on an allow-list row IS the plane the caller is on, so the values come from
+# :mod:`falcon_auth.planes` rather than being spelled a second time here. Re-exported under
+# their original names because consumers import them; the strings are unchanged, so no
+# allow-list config changes.
+KIND_SERVICE = SERVICE
+KIND_CALLBACK = CALLBACK
 
 
 @dataclass(frozen=True)
@@ -51,7 +59,7 @@ class Principal:
     """A verified, cert-bound east-west identity."""
 
     cn: str
-    kind: Literal["SERVICE", "CALLBACK"]
+    kind: EastWestKind
     source: str
     scopes: frozenset[str] = field(default_factory=frozenset)
 
@@ -76,10 +84,10 @@ def build_allow_list(entries: list[Any]) -> AllowList:
         kind = _get(entry, "kind")
         source = _get(entry, "source")
         scopes_raw = _get(entry, "scopes", default=[]) or []
-        if kind not in (KIND_SERVICE, KIND_CALLBACK):
+        if kind not in EAST_WEST_KINDS:
             raise ValueError(
                 f"svcplane allow_list entry cn={cn!r}: kind={kind!r} not in "
-                f"{{{KIND_SERVICE}, {KIND_CALLBACK}}}"
+                f"{sorted(EAST_WEST_KINDS)}"
             )
         allow[cn] = Principal(
             cn=cn,

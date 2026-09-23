@@ -40,7 +40,23 @@ __version__ = "0.1.0"
 # Falcon integration.
 #
 # Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a) · assurance (B1)
-#         · principal + entitlement (A3).
+#         · principal + entitlement (A3) · planes (A4).
+# The plane vocabulary. The bare constants (USER, SERVICE, CALLBACK, PUBLIC) are NOT
+# re-exported at top level: `from falcon_auth import SERVICE` reads ambiguously at a call site
+# and collides with names a consumer is likely to have of its own. Import the module and say
+# `planes.SERVICE`, which says which vocabulary the value belongs to.
+from . import planes
+from .planes import (
+    EAST_WEST_KINDS,
+    METHODS_BY_PLANE,
+    PLANE_BY_METHOD,
+    PLANES,
+    EastWestKind,
+    Method,
+    Plane,
+    methods_for,
+    plane_for,
+)
 from .eastwest import (
     KIND_CALLBACK,
     KIND_SERVICE,
@@ -100,35 +116,50 @@ from .identity import (
 
 __all__ = (
     "AllowList",
-    "AuthServiceResolver",
     "AuthenticatedUser",
+    "AuthServiceResolver",
     "AuthzError",
     "AuthzUnavailable",
+    "build_allow_list",
+    "build_enforcer",
+    "build_uvicorn_ssl_kwargs",
     "Cache",
     "CapabilityDenied",
     "CapabilityEnforcer",
+    "check_session_elevated",
     "DEFAULT_DECODE_OPTIONS",
     "DEVICE_TRUST_ATTESTED",
     "DEVICE_TRUST_BOUND",
     "DEVICE_TRUST_UNTRUSTED",
+    "EAST_WEST_KINDS",
+    "EastWestKind",
     "GrantAllResolver",
     "HttpTrustContextClient",
-    "KIND_CALLBACK",
-    "KIND_SERVICE",
     "InvalidToken",
     "JWKSStore",
     "JWKSVerifier",
     "JWTDecodeOptions",
+    "KIND_CALLBACK",
+    "KIND_SERVICE",
+    "Method",
+    "METHODS_BY_PLANE",
+    "methods_for",
     "MissingClientCertError",
-    "NullCache",
     "MissingScopeError",
+    "NullCache",
+    "peer_cn",
     "PeerCertH11Protocol",
     "PeerCertHttpToolsProtocol",
+    "Plane",
+    "PLANE_BY_METHOD",
+    "plane_for",
+    "planes",
+    "PLANES",
     "Principal",
     "RedisCache",
+    "Resolver",
     "SESSION_TRUST_AUTHENTICATED",
     "SESSION_TRUST_ELEVATED",
-    "Resolver",
     "SessionMiss",
     "StepUpRequired",
     "SvcPlaneError",
@@ -137,13 +168,8 @@ __all__ = (
     "TrustContextCache",
     "TrustContextClient",
     "Unauthenticated",
-    "UserPrincipal",
     "UnknownCNError",
+    "UserPrincipal",
     "Verifier",
     "__version__",
-    "check_session_elevated",
-    "build_allow_list",
-    "build_enforcer",
-    "build_uvicorn_ssl_kwargs",
-    "peer_cn",
 )
