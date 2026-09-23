@@ -148,14 +148,10 @@ class AuthServiceResolver:
     # ── §10: freshness, and what happens when the source is down ─────────────────
 
     async def _context(self, session_ref: str, user_ref: str, *, consequential: bool) -> TrustContext:
-        if not consequential:
-            cached = await self._cache.read(session_ref)
-            if cached is not None:
-                # Locally project the elevation window forward. §10: this catches expiry ONLY --
-                # never a disabled device or a demoted session -- which is exactly why a
-                # consequential operation skips the cache entirely rather than trusting this.
-                return cached.project()
-
+        # No warm path. Assurance is live (C-038/RUL-072): a cached trust level is one a demoted
+        # device can keep transacting behind for the length of the window. `consequential` still
+        # governs what happens when the source is DOWN, below -- it no longer selects between a
+        # cached read and a fresh one, because there is no cached read to select.
         try:
             context = await self._client.fetch(session_ref, user_ref=user_ref)
         except AuthzUnavailable:

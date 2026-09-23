@@ -18,11 +18,24 @@ Requires **mTLS + `require_service_scope("trust:read")`** on the calling service
 `403` here therefore means *our own* certificate is missing that scope: a deployment fault, mapped
 to `AuthzUnavailable`, never to a user denial.
 
-**Caching is by field, not by response.** The two halves change on completely different timescales
--- grants are the slowest-moving of the three levels, trust demotes on a timer *and* on device
-state -- so caching the payload as a unit silently serves a stale trust level. They are stored
-under separate keys with separate TTLs, and a trust miss forces a refetch even when the other half
-is still warm.
+**Assurance is never cached.** C-038/RUL-072 rules the feed's two concerns apart: grants may be
+revalidated cheaply, but assurance is LIVE -- "no blanket TTL over the whole response: a demoted
+device must not keep transacting for the length of a cache window". This module previously held
+the trust half for 60 seconds, which is precisely that window.
+
+The convention's replacement for a TTL is revalidation -- `grant_epoch` on the grants and an
+`ETag` on the response -- and auth emits NEITHER today; the wire shape is an unratified proposal
+(Q121). With no way to revalidate cheaply, the only conformant option left is to not serve
+assurance from cache, so there is no warm read path here at all. Every resolve reaches the source.
+
+⚠ THE COST, recorded rather than hidden: routine reads that previously served from a warm cache
+now call auth on every request. That is a real load increase on the trust source, and it is what
+the convention asks for. The field-split cache returns the day auth ships `grant_epoch` + `ETag`,
+at which point the warm path becomes a conditional request rather than a timer.
+
+`read_last_good` is NOT that cache and stays. It serves only when the source is UNREACHABLE, only
+for routine operations, and logs a warning each time -- the degradation path (C-011), not a cache
+window a demoted device can hide inside.
 
 KNOWN BREAK, recorded rather than worked around: auth emits **no grants at all** today, under any
 name, so `TrustContext.grants` fails validation against a live auth on every call. That is the
@@ -46,7 +59,6 @@ from datetime import (
     datetime,
     UTC,
 )
-import json
 from typing import (
     Any,
     Protocol,
@@ -68,9 +80,7 @@ from .errors import (
 
 __all__ = (
     "Cache",
-    "DEFAULT_GRANTS_TTL",
     "DEFAULT_LAST_GOOD_TTL",
-    "DEFAULT_TRUST_TTL",
     "DEVICE_TRUST_ATTESTED",
     "DEVICE_TRUST_BOUND",
     "DEVICE_TRUST_UNTRUSTED",
@@ -240,9 +250,11 @@ def _error_code(body: Any) -> int | None:
     return raw if isinstance(raw, int) else None
 
 
-DEFAULT_GRANTS_TTL = 300        # grants are the slowest-moving of the three levels
-DEFAULT_TRUST_TTL = 60          # trust demotes on a timer and on device state -- keep it short
 DEFAULT_LAST_GOOD_TTL = 900     # only ever read when the source is down
+
+# There is deliberately no trust TTL and no grants TTL. Assurance is live (C-038/RUL-072), and
+# with assurance uncacheable a grants-only entry can never be assembled into a context, so
+# holding one would be dead weight that reads like a working cache.
 
 
 class Cache(Protocol):
@@ -294,50 +306,27 @@ class RedisCache:
 
 
 class TrustContextCache:
-    """The §10 field split over any `Cache`.
+    """The degradation store. **Not a read-through cache** -- see the module docstring.
 
-    `read` returns a context only when **both** halves are warm, so a demoted trust level can never
-    be masked by a still-valid grants entry.
+    It holds one thing: the last context the source successfully returned, for the case where the
+    source later becomes unreachable. Nothing here is consulted while auth is answering.
+
+    There is no `read`. Assurance is live (C-038/RUL-072), so a context cannot be assembled from
+    cache without serving a trust level that may already have been demoted -- which is the exact
+    hazard the rule names.
     """
 
     def __init__(
         self,
         cache: Cache,
         *,
-        grants_ttl: int = DEFAULT_GRANTS_TTL,
-        trust_ttl: int = DEFAULT_TRUST_TTL,
         last_good_ttl: int = DEFAULT_LAST_GOOD_TTL,
     ) -> None:
         self._cache = cache
-        self._grants_ttl = grants_ttl
-        self._trust_ttl = trust_ttl
         self._last_good_ttl = last_good_ttl
 
-    async def read(self, session_ref: str) -> TrustContext | None:
-        grants_raw = await self._cache.get(f"grants:{session_ref}")
-        if grants_raw is None:
-            return None
-        trust_raw = await self._cache.get(f"trust:{session_ref}")
-        if trust_raw is None:
-            return None  # trust expired -> refetch, even though grants are still warm
-        return _merge(grants_raw, trust_raw)
-
     async def write(self, context: TrustContext) -> None:
-        grants = json.dumps({
-            "session_ref": context.session_ref,
-            "user_ref": context.user_ref,
-            "grants": context.grants,
-        })
-        trust = json.dumps({
-            "session_state": context.session_state,
-            "device_trust_level": context.device_trust_level,
-            "session_trust_level": context.session_trust_level,
-            "trust_elevated_until": context.trust_elevated_until,
-            "client_ref": context.client_ref,
-            "device_ref": context.device_ref,
-        })
-        await self._cache.set(f"grants:{context.session_ref}", grants, self._grants_ttl)
-        await self._cache.set(f"trust:{context.session_ref}", trust, self._trust_ttl)
+        """Record this as the last good answer. Called after every successful fetch."""
         await self._cache.set(
             f"lastgood:{context.session_ref}", context.model_dump_json(), self._last_good_ttl
         )
@@ -352,10 +341,3 @@ class TrustContextCache:
         except Exception:  # noqa: BLE001 -- a corrupt entry is a miss, never a crash
             return None
 
-
-def _merge(grants_raw: str, trust_raw: str) -> TrustContext | None:
-    try:
-        merged: dict[str, Any] = {**json.loads(grants_raw), **json.loads(trust_raw)}
-        return TrustContext.model_validate(merged)
-    except Exception:  # noqa: BLE001 -- a corrupt half is a miss; the source is one call away
-        return None
