@@ -39,7 +39,7 @@ __version__ = "0.1.0"
 # implementation detail, except `adapters`, which consumers import directly for the
 # Falcon integration.
 #
-# Landed: eastwest (A1).
+# Landed: eastwest (A1) · identity (A2).
 from .eastwest import (
     KIND_CALLBACK,
     KIND_SERVICE,
@@ -57,11 +57,23 @@ from .eastwest import (
     build_uvicorn_ssl_kwargs,
     peer_cn,
 )
+from .identity import (
+    DEFAULT_DECODE_OPTIONS,
+    InvalidToken,
+    JWKSStore,
+    JWKSVerifier,
+    JWTDecodeOptions,
+)
 
 __all__ = (
     "AllowList",
+    "DEFAULT_DECODE_OPTIONS",
     "KIND_CALLBACK",
     "KIND_SERVICE",
+    "InvalidToken",
+    "JWKSStore",
+    "JWKSVerifier",
+    "JWTDecodeOptions",
     "MissingClientCertError",
     "MissingScopeError",
     "PeerCertH11Protocol",

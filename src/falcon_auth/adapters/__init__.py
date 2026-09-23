@@ -24,14 +24,15 @@ tidy-up smuggled into the port.
 Modules:
     hooks.py            require_service_scope · require_callback · principal_from_request
     errors.py           register_error_handlers · render_svcplane_error
+    authenticators.py   RemoteJWKSAuthenticator
 
 Planned:
     middleware.py       the plane → [methods] authentication middleware (C-038)
-    authenticators.py   RemoteJWKSAuthenticator
 """
 
 from __future__ import annotations
 
+from .authenticators import RemoteJWKSAuthenticator
 from .errors import register_error_handlers, render_svcplane_error
 from .hooks import (
     HookFn,
@@ -42,6 +43,7 @@ from .hooks import (
 
 __all__ = (
     "HookFn",
+    "RemoteJWKSAuthenticator",
     "principal_from_request",
     "register_error_handlers",
     "render_svcplane_error",

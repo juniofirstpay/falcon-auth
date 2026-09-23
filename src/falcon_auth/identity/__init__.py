@@ -12,6 +12,25 @@ timeouts, its certificate-rotation story — and the store is testable without a
 versus asserted*: this part vouches for what it verified, and a caller must not be able to
 assert anything an authorization layer will act on.
 
-Planned modules:
-    jwks.py    JWKSStore · JWKSVerifier · InvalidToken · DEFAULT_DECODE_OPTIONS
+⭐ **Ported** from the copy running in two services, with the stricter of each repo's
+hardenings merged: one had the claim allowlist, the other required `sub` and honoured `nbf`.
+`JWKSStore`'s code is identical to that original, verified by AST comparison.
 """
+
+from __future__ import annotations
+
+from .jwks import (
+    DEFAULT_DECODE_OPTIONS,
+    InvalidToken,
+    JWKSStore,
+    JWKSVerifier,
+    JWTDecodeOptions,
+)
+
+__all__ = (
+    "DEFAULT_DECODE_OPTIONS",
+    "InvalidToken",
+    "JWKSStore",
+    "JWKSVerifier",
+    "JWTDecodeOptions",
+)
