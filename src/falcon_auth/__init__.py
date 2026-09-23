@@ -38,4 +38,41 @@ __version__ = "0.1.0"
 # The public API is re-exported here as each part lands; the submodule tree is an
 # implementation detail, except `adapters`, which consumers import directly for the
 # Falcon integration.
-__all__: tuple[str, ...] = ()
+#
+# Landed: eastwest (A1).
+from .eastwest import (
+    KIND_CALLBACK,
+    KIND_SERVICE,
+    AllowList,
+    MissingClientCertError,
+    MissingScopeError,
+    PeerCertH11Protocol,
+    PeerCertHttpToolsProtocol,
+    Principal,
+    SvcPlaneError,
+    SvcPlaneErrorCodes,
+    UnknownCNError,
+    Verifier,
+    build_allow_list,
+    build_uvicorn_ssl_kwargs,
+    peer_cn,
+)
+
+__all__ = (
+    "AllowList",
+    "KIND_CALLBACK",
+    "KIND_SERVICE",
+    "MissingClientCertError",
+    "MissingScopeError",
+    "PeerCertH11Protocol",
+    "PeerCertHttpToolsProtocol",
+    "Principal",
+    "SvcPlaneError",
+    "SvcPlaneErrorCodes",
+    "UnknownCNError",
+    "Verifier",
+    "__version__",
+    "build_allow_list",
+    "build_uvicorn_ssl_kwargs",
+    "peer_cn",
+)

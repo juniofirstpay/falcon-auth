@@ -11,8 +11,49 @@ part **trusts** that CN: chain validation is TLS's job, delegated to the handsha
 ⚠ `mtls` is the one module here that is **boot-time transport wiring** rather than a
 request-time decision — it configures uvicorn's SSL context so a CN can be read at all.
 
-Planned modules:
-    verifier.py    Verifier · AllowList · build_allow_list · peer_cn
-    mtls.py        build_uvicorn_ssl_kwargs · peer-cert protocols
-    errors.py      MissingClientCertError · UnknownCNError · MissingScopeError
+⭐ **Ported from `falcon-svcplane` behaviour-identical**, with its tests as the correctness
+check. Anything that changes what this code *does* belongs in a separate commit, so a failure
+during migration can be attributed to one or the other.
 """
+
+from __future__ import annotations
+
+from .errors import (
+    MissingClientCertError,
+    MissingScopeError,
+    SvcPlaneError,
+    SvcPlaneErrorCodes,
+    UnknownCNError,
+)
+from .mtls import (
+    PeerCertH11Protocol,
+    PeerCertHttpToolsProtocol,
+    build_uvicorn_ssl_kwargs,
+)
+from .verifier import (
+    KIND_CALLBACK,
+    KIND_SERVICE,
+    AllowList,
+    Principal,
+    Verifier,
+    build_allow_list,
+    peer_cn,
+)
+
+__all__ = (
+    "AllowList",
+    "KIND_CALLBACK",
+    "KIND_SERVICE",
+    "MissingClientCertError",
+    "MissingScopeError",
+    "PeerCertH11Protocol",
+    "PeerCertHttpToolsProtocol",
+    "Principal",
+    "SvcPlaneError",
+    "SvcPlaneErrorCodes",
+    "UnknownCNError",
+    "Verifier",
+    "build_allow_list",
+    "build_uvicorn_ssl_kwargs",
+    "peer_cn",
+)

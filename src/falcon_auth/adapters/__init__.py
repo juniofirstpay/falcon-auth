@@ -7,17 +7,44 @@ and a non-Falcon consumer could use them unchanged.
 package that imports `falcon` resolves correctly under Python 3's absolute imports but reads
 ambiguously and confuses tooling.
 
-⚠ **Every hook absorbs stray keyword arguments.** `falcon.before(action, *args, **kwargs)`
-forwards all of them to the hook, including the `is_async=True` that callers across this
-ecosystem still pass believing Falcon consumes it. Falcon 3 did; Falcon 4 detects hooks
-automatically and the parameter is gone, so it now arrives as a stray kwarg — and a strict
-`(req, resp, resource, params)` signature raises `TypeError`, which is a **500 on a gated
-route**. Nothing is read from them, on purpose: a gate that changed behaviour based on decorator
-kwargs would be a second, invisible configuration surface.
+⚠ **The two hook families disagree about stray keyword arguments, and that is not yet
+reconciled.** `falcon.before(action, *args, **kwargs)` forwards every extra keyword to the hook,
+including the `is_async=True` that callers across this ecosystem still pass believing Falcon
+consumes it — Falcon 3 did; Falcon 4 detects hooks automatically and the parameter is gone.
 
-Planned modules:
+    east-west hooks (ported here)   STRICT `(req, resp, resource, params)`
+                                    ⛔ passing `is_async=True` raises TypeError — a 500 on a
+                                    gated route. Consumers must omit it.
+    entitlement hooks (not yet)     absorb `*_a, **_kw` and read nothing from them
+
+⭐ The east-west hooks are strict **because that is how they behave today**, and A1 is a
+behaviour-identical port. Making the two families agree is a deliberate later change, not a
+tidy-up smuggled into the port.
+
+Modules:
+    hooks.py            require_service_scope · require_callback · principal_from_request
+    errors.py           register_error_handlers · render_svcplane_error
+
+Planned:
     middleware.py       the plane → [methods] authentication middleware (C-038)
     authenticators.py   RemoteJWKSAuthenticator
-    hooks.py            require · require_elevated · require_service_scope · require_callback
-    errors.py           register_error_handlers
 """
+
+from __future__ import annotations
+
+from .errors import register_error_handlers, render_svcplane_error
+from .hooks import (
+    HookFn,
+    principal_from_request,
+    require_callback,
+    require_service_scope,
+)
+
+__all__ = (
+    "HookFn",
+    "principal_from_request",
+    "register_error_handlers",
+    "render_svcplane_error",
+    "require_callback",
+    "require_service_scope",
+)
