@@ -220,6 +220,20 @@ class PlaneRegistry:
     def registration_of(self, method: str, path: str) -> Registration | None:
         return self._by_endpoint.get((method.upper(), path))
 
+    def registered_methods(self, path: str) -> frozenset[str]:
+        """Every HTTP method registered for ``path``.
+
+        The middleware needs this to tell two cases apart, because Falcon runs
+        ``process_resource`` for BOTH of them:
+
+            the template has rows, but not for this method   -> Falcon's own 405; not ours
+            the template has no rows at all                  -> an unregistered route; refuse
+
+        Without the distinction, a DELETE against a GET-only resource looks exactly like a
+        route that never reached the registry, and a clean 405 becomes a 500.
+        """
+        return frozenset(m for (m, p) in self._by_endpoint if p == path)
+
     def plane_of_class(self, resource_type: type) -> Plane | None:
         return reg.plane if (reg := self._by_class.get(resource_type)) else None
 

@@ -29,9 +29,8 @@ Modules:
     authenticators.py   RemoteJWKSAuthenticator
     routing.py          PlaneRegistry · mount · verify_app -- one plane per endpoint,
                         refused at startup (C-006)
-
-Planned:
-    middleware.py       the plane -> [methods] authentication middleware, and the
+    middleware.py       PlaneAuthenticationMiddleware -- the per-request assertion that the
+                        caller's credential matches the endpoint's plane, and the
                         wrong-plane 404 (C-038)
 """
 
@@ -39,6 +38,13 @@ from __future__ import annotations
 
 from .authenticators import RemoteJWKSAuthenticator
 from .errors import register_error_handlers, render_svcplane_error
+from .middleware import (
+    AUTH_METHOD_ATTR,
+    AUTH_PRINCIPAL_ATTR,
+    PLANE_ATTR,
+    Authenticator,
+    PlaneAuthenticationMiddleware,
+)
 from .routing import (
     DEFAULT_PROBE_PATHS,
     Endpoint,
@@ -61,10 +67,15 @@ from .hooks import (
 )
 
 __all__ = (
+    "AUTH_METHOD_ATTR",
+    "AUTH_PRINCIPAL_ATTR",
+    "Authenticator",
     "DEFAULT_PROBE_PATHS",
     "Endpoint",
     "HookFn",
     "mount",
+    "PLANE_ATTR",
+    "PlaneAuthenticationMiddleware",
     "PlaneConflict",
     "PlaneRegistry",
     "PRINCIPAL_ATTR",
