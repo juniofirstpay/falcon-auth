@@ -101,3 +101,5 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 [`docs/EASTWEST.md`](docs/EASTWEST.md) does the same for east-west: how a peer service's certificate becomes an identity, the allow-list check, and the three refusals.
 
 [`docs/IDENTITY.md`](docs/IDENTITY.md) covers the user plane: how a JWT is checked against the issuer's rotating keyring, why the algorithm is pinned server-side, and why the claim allowlist has no default.
+
+[`docs/ASSURANCE.md`](docs/ASSURANCE.md) covers step-up: the two session-trust tiers, why the read is never cached, and why a step-up refusal is a challenge rather than a denial.
