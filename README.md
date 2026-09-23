@@ -96,4 +96,6 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## How it runs
 
-[`FLOW.md`](FLOW.md) traces what calls what: the boot sequence, the per-request resolution, every exit and its status code, and the three seams where a consumer's own code is called.
+[`FLOW.md`](FLOW.md) traces what calls what across the plane system: the boot sequence, the per-request resolution, every exit and its status code, and the three seams where a consumer's own code is called.
+
+[`docs/EASTWEST.md`](docs/EASTWEST.md) does the same for east-west: how a peer service's certificate becomes an identity, the allow-list check, and the three refusals.
