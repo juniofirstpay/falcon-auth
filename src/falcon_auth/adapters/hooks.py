@@ -23,7 +23,7 @@ Typical wiring::
         async def on_get_sessions(self, req, resp): ...
 
 The verifier stashes the authenticated :class:`~falcon_auth.eastwest.verifier.Principal`
-on ``req.context.svcplane_principal`` — handlers that need to know *who*
+on ``req.context.eastwest_principal`` — handlers that need to know *who*
 called them can read it with :func:`principal_from_request`.
 """
 
@@ -37,7 +37,7 @@ import falcon.asgi
 from ..eastwest.verifier import Principal, Verifier
 
 
-_PRINCIPAL_CTX_ATTR = "svcplane_principal"
+_PRINCIPAL_CTX_ATTR = "eastwest_principal"
 
 
 HookFn = Callable[

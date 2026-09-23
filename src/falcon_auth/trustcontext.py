@@ -170,20 +170,24 @@ class HttpTrustContextClient:
         self,
         session_getter: Callable[[], aiohttp.ClientSession],
         *,
-        api_version: str = "1",
-        path_template: str = "/internal/sessions/{session_ref}/trust-context",
+        path_template: str,
     ) -> None:
+        """
+        :param session_getter: returns the host's already-configured mTLS session.
+        :param path_template: auth's trust-context path, with a `{session_ref}` placeholder.
+            Required, with no default. The path is a deployment fact -- where auth is
+            mounted, and under which API version -- and a default here would be a guess
+            baked into a library, wrong for the first consumer that mounts it elsewhere.
+            C-039 puts the version in the first path segment, so this is where it goes.
+        """
         self._session_getter = session_getter
-        self._headers = {"X-API-Version": api_version}
         self._path_template = path_template
 
     async def fetch(self, session_ref: str, *, user_ref: str) -> TrustContext:
         path = self._path_template.format(session_ref=session_ref)
         try:
             session = self._session_getter()
-            async with session.get(
-                path, params={"user_ref": user_ref}, headers=self._headers
-            ) as response:
+            async with session.get(path, params={"user_ref": user_ref}) as response:
                 if response.status == 200:
                     return TrustContext.model_validate(await response.json())
                 await self._raise_for(response)
@@ -263,7 +267,11 @@ class RedisCache:
     should get slower and keep authorizing, not start refusing people.
     """
 
-    def __init__(self, client: Any, *, prefix: str = "authz") -> None:
+    def __init__(self, client: Any, *, prefix: str) -> None:
+        """
+        :param prefix: the key namespace. Required: a shared redis is shared, and a
+            default would collide two services' entries the first time both used it.
+        """
         self._client = client
         self._prefix = prefix
 

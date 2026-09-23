@@ -185,3 +185,64 @@ async def test_null_cache_always_misses():
     await cache.write(_ctx())
     assert await cache.read("sess-1") is None
     assert await cache.read_last_good("sess-1") is None
+
+
+# ── nothing deployment-specific is hardcoded ──────────────────────────────────
+
+
+def test_the_trust_context_path_is_required():
+    """Where auth is mounted, and under which API version, is a deployment fact.
+
+    A default here would be a guess baked into a library, wrong for the first consumer
+    that mounts auth elsewhere -- and C-039 moves the version into the first path
+    segment, so the path is exactly where that variation lands.
+    """
+    from falcon_auth.trustcontext import HttpTrustContextClient
+
+    with pytest.raises(TypeError):
+        HttpTrustContextClient(lambda: None)  # type: ignore[call-arg,arg-type]
+
+
+def test_the_cache_key_prefix_is_required():
+    """A shared redis is shared: a default namespace collides two services' entries
+    the first time both use it."""
+    from falcon_auth.trustcontext import RedisCache
+
+    with pytest.raises(TypeError):
+        RedisCache(object())  # type: ignore[call-arg]
+
+
+async def test_the_client_sends_no_api_version_header():
+    """C-039 drops `X-API-Version` altogether -- the version is the first path segment."""
+    from falcon_auth.trustcontext import HttpTrustContextClient
+
+    seen: dict = {}
+
+    class _Resp:
+        status = 200
+
+        async def json(self):
+            return {**BASE, "grants": ["RETAIL_USER"]}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def get(self, path, **kwargs):
+            seen["path"] = path
+            seen["kwargs"] = kwargs
+            return _Resp()
+
+    client = HttpTrustContextClient(
+        lambda: _Session(),  # type: ignore[arg-type,return-value]
+        path_template="/v1/internal/sessions/{session_ref}/trust-context",
+    )
+    ctx = await client.fetch("sess-1", user_ref="user-1")
+
+    assert ctx.grants == ["RETAIL_USER"]
+    assert seen["path"] == "/v1/internal/sessions/sess-1/trust-context"
+    assert "headers" not in seen["kwargs"], "no X-API-Version header (C-039)"
+    assert seen["kwargs"]["params"] == {"user_ref": "user-1"}
