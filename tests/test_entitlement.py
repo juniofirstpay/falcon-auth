@@ -7,7 +7,7 @@ because nothing grants yet.
 
 import pytest
 
-from falcon_auth.entitlement.enforcer import build_enforcer
+from falcon_auth.entitlement.enforcer import build_enforcer, normalise_registry
 from falcon_auth.entitlement.resolver import AuthServiceResolver, GrantAllResolver
 from falcon_auth.errors import AuthzUnavailable, CapabilityDenied, SessionMiss
 from falcon_auth.principal import Principal
@@ -101,6 +101,48 @@ def test_an_unregistered_capability_is_denied_and_reportable():
     riya = Principal(user_ref="riya", entitlements=["ORDER_READ"])
     assert not e.allows_principal(riya, "orders:delete")
     assert not e.knows("orders:delete"), "a host's startup check can say this is a wiring bug"
+
+
+# ── any-of alternatives (RUL-073) ─────────────────────────────────────────────
+
+
+def test_a_capability_may_list_alternatives_and_either_opens_it():
+    """Many entitlements over ONE capability. `txn:read` opened by TXN_READ or SUPPORT_READ is a
+    single row listing both -- not two capabilities, which would split the route in two."""
+    e = build_enforcer({**REGISTRY, "txn:read": ["TXN_READ", "SUPPORT_READ"]})
+    by_own = Principal(user_ref="riya", entitlements=["TXN_READ"])
+    by_support = Principal(user_ref="agent", entitlements=["SUPPORT_READ"])
+    assert e.allows_principal(by_own, "txn:read")
+    assert e.allows_principal(by_support, "txn:read")
+
+
+def test_holding_neither_alternative_still_denies():
+    e = build_enforcer({**REGISTRY, "txn:read": ["TXN_READ", "SUPPORT_READ"]})
+    assert not e.allows_principal(Principal(user_ref="x", entitlements=["ORDER_READ"]), "txn:read")
+
+
+def test_a_bare_string_still_works_and_reads_as_one_alternative():
+    """The 8 rows in orders and 15 in onboarding are all bare strings. RUL-073 makes the list the
+    authored form; it does not make a migration a precondition."""
+    e = build_enforcer(REGISTRY)
+    assert e.registry["orders:list"] == ["ORDER_READ"]
+    assert e.allows_principal(Principal(user_ref="r", entitlements=["ORDER_READ"]), "orders:list")
+
+
+def test_the_registry_reads_back_normalised_whatever_was_authored():
+    """So a caller reading it never branches on the two shapes."""
+    e = build_enforcer({"a:read": "A", "b:read": ["B1", "B2"]})
+    assert e.registry == {"a:read": ["A"], "b:read": ["B1", "B2"]}
+
+
+def test_an_empty_list_refuses_at_build_like_an_empty_string():
+    with pytest.raises(ValueError, match="empty entitlement"):
+        build_enforcer({**REGISTRY, "orders:ghost": []})
+
+
+def test_a_list_of_blanks_refuses_too():
+    with pytest.raises(ValueError, match="empty entitlement"):
+        build_enforcer({**REGISTRY, "orders:ghost": ["  ", ""]})
 
 
 def test_a_capability_mapped_to_nothing_refuses_at_build():

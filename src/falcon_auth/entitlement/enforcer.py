@@ -19,9 +19,28 @@ the question is asked ("does this key open...").
 import casbin
 from casbin.model import Model
 
+from collections.abc import Mapping
+
 from ..principal import Principal
 
-__all__ = ("CapabilityEnforcer", "MODEL_TEXT", "build_enforcer")
+__all__ = ("CapabilityEnforcer", "MODEL_TEXT", "Registry", "build_enforcer", "normalise_registry")
+
+#: What a service authors. The value is an ANY-OF list of entitlements (RUL-073): the caller
+#: passes if it holds ANY of them. A bare string is accepted and read as a one-element list,
+#: so a registry written before the list form keeps working unchanged.
+#:
+#: The two directions this expresses, and why they are not the same thing:
+#:
+#:    one entitlement over many capabilities   several rows naming the same entitlement
+#:                                             -- grouping, already in use: 12 entitlements
+#:                                             govern 2-4 capabilities each
+#:    many entitlements over one capability    ONE row listing them, any-of -- alternatives
+#:
+#: Alternatives are listed EXPLICITLY: no wildcards, no prefix matching, no role transitivity
+#: on this axis, so "who can reach this route" is answerable from one row. ADR-210 still
+#: governs the judgement -- if one alternative's blast radius differs from another's, it
+#: belongs to a DIFFERENT capability, not the same row.
+Registry = Mapping[str, str | list[str]]
 
 # `sub` = a held entitlement · `obj` = the capability a route requires. Allow iff a policy pairs them
 # exactly. Nothing else is expressible, and nothing else should be.
@@ -40,14 +59,18 @@ m = r.sub == p.sub && r.obj == p.obj
 class CapabilityEnforcer:
     """Wraps casbin so callers ask one question and the first-match-wins loop lives in one place."""
 
-    def __init__(self, enforcer: casbin.Enforcer, registry: dict[str, str]) -> None:
+    def __init__(self, enforcer: casbin.Enforcer, registry: Registry) -> None:
         self._enforcer = enforcer
-        self._registry = dict(registry)
+        self._registry = normalise_registry(registry)
 
     @property
-    def registry(self) -> dict[str, str]:
-        """The capability -> entitlement map this enforcer was built from (a copy; do not mutate)."""
-        return dict(self._registry)
+    def registry(self) -> dict[str, list[str]]:
+        """The capability -> entitlements map this enforcer was built from.
+
+        Always the NORMALISED form -- every value a list, whatever the author wrote -- so a
+        caller reading it back never has to branch on the two shapes. A copy; do not mutate.
+        """
+        return {cap: list(ents) for cap, ents in self._registry.items()}
 
     def knows(self, capability: str) -> bool:
         """Whether `capability` has a policy row at all.
@@ -66,22 +89,44 @@ class CapabilityEnforcer:
         return self.allows(principal.entitlements, capability)
 
 
-def build_enforcer(registry: dict[str, str]) -> CapabilityEnforcer:
-    """Build the gate from a service's §9.1 registry. In-memory policy: no adapter, no policy file.
+def normalise_registry(registry: Registry) -> dict[str, list[str]]:
+    """Read every value as an any-of list, and refuse a row that grants nothing.
 
-    Raises on a capability mapped to an empty entitlement. That row would deny every caller forever
-    while *looking* configured, so it fails at import rather than at 3am -- the same reason §9.1 says
-    absence must never mean ungated.
+    A capability mapped to nothing -- an empty string, an empty list, or a list of blanks -- would
+    deny every caller forever while LOOKING configured. It fails at import rather than at 3am,
+    for the same reason absence must never mean "ungated".
     """
-    blank = sorted(cap for cap, ent in registry.items() if not ent or not ent.strip())
+    out: dict[str, list[str]] = {}
+    blank: list[str] = []
+    for capability, value in registry.items():
+        entitlements = [value] if isinstance(value, str) else list(value)
+        kept = [e.strip() for e in entitlements if isinstance(e, str) and e.strip()]
+        if not kept:
+            blank.append(capability)
+            continue
+        out[capability] = kept
     if blank:
-        raise ValueError(f"capabilities mapped to an empty entitlement: {', '.join(blank)}")
+        raise ValueError(
+            f"capabilities mapped to an empty entitlement: {', '.join(sorted(blank))}"
+        )
+    return out
+
+
+def build_enforcer(registry: Registry) -> CapabilityEnforcer:
+    """Build the gate from a service's capability registry. In-memory: no adapter, no policy file.
+
+    Each entitlement in a row becomes its own `p` row. Any-of then falls out of the policy effect
+    -- `some(where (p.eft == allow))` -- rather than needing a second mechanism: two `p` rows
+    naming one capability mean either holding opens it.
+    """
+    normalised = normalise_registry(registry)
 
     model: Model = casbin.Enforcer.new_model(text=MODEL_TEXT)
     enforcer = casbin.Enforcer(model)
-    for capability, entitlement in registry.items():
-        enforcer.add_policy(entitlement, capability)
-    return CapabilityEnforcer(enforcer, registry)
+    for capability, entitlements in normalised.items():
+        for entitlement in entitlements:
+            enforcer.add_policy(entitlement, capability)
+    return CapabilityEnforcer(enforcer, normalised)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -92,10 +137,6 @@ def build_enforcer(registry: dict[str, str]) -> CapabilityEnforcer:
 #   MODEL_TEXT             must come from the platform artifact (registry/AUTHZ-MODEL.md §2),
 #                          never be re-authored per service. The target adds a
 #                          [role_definition] and wraps r.sub: `m = g(r.sub, p.sub) && ...`
-#
-#   Registry              `dict[str, str]` must become `dict[str, list[str]]`, read ANY-OF
-#                          (RUL-073): a capability opened by TXN_READ *or* SUPPORT_READ is one
-#                          row listing both, never two capabilities
 #
 #   The `g` layer          the grant -> entitlement expansion currently lives outside this file
 #                          as a hand-written `_expand` callable. C-038 puts it in the SAME
