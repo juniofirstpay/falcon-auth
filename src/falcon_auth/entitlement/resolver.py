@@ -124,9 +124,10 @@ class AuthServiceResolver:
     async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
         """Resolve `user` to a `Principal`.
 
-        `consequential` marks an operation for which the entitlement *is* the control (§10): it takes
-        a fresh read rather than the cache, and fails closed rather than serving last-good grants.
-        The flag is plumbed but nothing sets it until a service fills in its §9.2 registry.
+        `consequential` marks an operation for which the entitlement *is* the control. Every read
+        is fresh now -- C6 removed the warm path -- so what the flag selects is what happens when
+        the source is DOWN: a consequential operation fails closed, a routine one may serve the
+        last-good copy. Nothing sets it until a service classifies its own operations.
         """
         session_ref = user.get(self._session_claim)
         if not session_ref:

@@ -174,9 +174,10 @@ def require(
     capability has no row in the §9.1 registry. A route asking for a capability nobody registered is
     a wiring bug, and §9.1 is explicit that absence must never quietly mean ungated.
 
-    `consequential` marks an operation for which the entitlement is the control: it forces a fresh
-    trust read and fails closed when the source is down (§10). Nothing sets it until a service fills
-    in its §9.2 registry.
+    `consequential` marks an operation for which the entitlement is the control. Every trust read
+    is fresh regardless; what this selects is the behaviour when the source is DOWN -- fail closed
+    rather than serve the last-good copy. Nothing sets it until a service classifies its own
+    operations.
     """
     if not enforcer.knows(capability):
         raise ValueError(
