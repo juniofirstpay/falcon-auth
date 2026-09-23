@@ -39,7 +39,7 @@ __version__ = "0.1.0"
 # implementation detail, except `adapters`, which consumers import directly for the
 # Falcon integration.
 #
-# Landed: eastwest (A1) · identity (A2).
+# Landed: eastwest (A1) · identity (A2) · trustcontext + errors (A4a).
 from .eastwest import (
     KIND_CALLBACK,
     KIND_SERVICE,
@@ -57,6 +57,27 @@ from .eastwest import (
     build_uvicorn_ssl_kwargs,
     peer_cn,
 )
+from .errors import (
+    AuthzError,
+    AuthzUnavailable,
+    CapabilityDenied,
+    SessionMiss,
+    Unauthenticated,
+)
+from .trustcontext import (
+    DEVICE_TRUST_ATTESTED,
+    DEVICE_TRUST_BOUND,
+    DEVICE_TRUST_UNTRUSTED,
+    SESSION_TRUST_AUTHENTICATED,
+    SESSION_TRUST_ELEVATED,
+    Cache,
+    HttpTrustContextClient,
+    NullCache,
+    RedisCache,
+    TrustContext,
+    TrustContextCache,
+    TrustContextClient,
+)
 from .identity import (
     DEFAULT_DECODE_OPTIONS,
     InvalidToken,
@@ -67,7 +88,15 @@ from .identity import (
 
 __all__ = (
     "AllowList",
+    "AuthzError",
+    "AuthzUnavailable",
+    "Cache",
+    "CapabilityDenied",
     "DEFAULT_DECODE_OPTIONS",
+    "DEVICE_TRUST_ATTESTED",
+    "DEVICE_TRUST_BOUND",
+    "DEVICE_TRUST_UNTRUSTED",
+    "HttpTrustContextClient",
     "KIND_CALLBACK",
     "KIND_SERVICE",
     "InvalidToken",
@@ -75,12 +104,21 @@ __all__ = (
     "JWKSVerifier",
     "JWTDecodeOptions",
     "MissingClientCertError",
+    "NullCache",
     "MissingScopeError",
     "PeerCertH11Protocol",
     "PeerCertHttpToolsProtocol",
     "Principal",
+    "RedisCache",
+    "SESSION_TRUST_AUTHENTICATED",
+    "SESSION_TRUST_ELEVATED",
+    "SessionMiss",
     "SvcPlaneError",
     "SvcPlaneErrorCodes",
+    "TrustContext",
+    "TrustContextCache",
+    "TrustContextClient",
+    "Unauthenticated",
     "UnknownCNError",
     "Verifier",
     "__version__",
