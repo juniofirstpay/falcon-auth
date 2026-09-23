@@ -19,21 +19,26 @@ Requires **mTLS + `require_service_scope("trust:read")`** on the calling service
 to `AuthzUnavailable`, never to a user denial.
 
 **Caching is by field, not by response.** The two halves change on completely different timescales
--- grants rarely, trust on a timer *and* on device state -- so caching the payload as a unit
-silently serves a stale trust level. They are stored under separate keys with separate TTLs, and a
-trust miss forces a refetch even when the other half is still warm.
+-- grants are the slowest-moving of the three levels, trust demotes on a timer *and* on device
+state -- so caching the payload as a unit silently serves a stale trust level. They are stored
+under separate keys with separate TTLs, and a trust miss forces a refetch even when the other half
+is still warm.
 
-TWO KNOWN BREAKS, ported as-is rather than fixed here:
+KNOWN BREAK, recorded rather than worked around: auth emits **no grants at all** today, under any
+name, so `TrustContext.grants` fails validation against a live auth on every call. That is the
+estate's X-09, it is open against a ratified convention, and closing it is a build at auth plus the
+first allocation into the platform grant register -- not a local edit.
 
-1. `TrustContext.entitlements` is typed REQUIRED and auth emits no such field at all. Wiring a real
-   resolver against a live auth therefore fails validation on every call. This is the estate's
-   X-09, it is open against a ratified convention, and closing it needs a build at auth plus a
-   coordinated rename -- not a local edit.
+The field is typed REQUIRED deliberately in the face of that. Making it optional would turn a
+service that cannot resolve anybody into one that silently resolves everybody to "holds nothing"
+and 403s -- the original called that "a total outage wearing the costume of a permissions
+problem". Failing loudly is the honest state of the layer until auth ships.
 
-2. The field is named `entitlements` in the source this was ported from. C-038 rules that what
-   auth emits is a **grant**, never a service's entitlement, and that the field is renamed rather
-   than accommodated. The rename is left for that coordinated change so this port stays auditable
-   against the original.
+RENAMED from `entitlements`, which is what the two services this was ported from call it. C-038
+(RUL-074) rules that what auth emits is a coarse **grant**, never a service's entitlement, and
+X-09 rules the field is renamed rather than accommodated. The name `grants` follows the thread's
+proposed wire shape; the `grant_epoch` and `ETag` it also proposes are left out, being explicitly
+unconfirmed.
 """
 
 from collections.abc import Callable
@@ -63,7 +68,7 @@ from .errors import (
 
 __all__ = (
     "Cache",
-    "DEFAULT_ENTITLEMENTS_TTL",
+    "DEFAULT_GRANTS_TTL",
     "DEFAULT_LAST_GOOD_TTL",
     "DEFAULT_TRUST_TTL",
     "DEVICE_TRUST_ATTESTED",
@@ -108,11 +113,19 @@ class TrustContext(BaseModel):
 
     session_ref: str
     user_ref: str
-    # NOT in auth's published endpoint doc, but present in the response and load-bearing here.
+    # The COARSE grants auth confers on this session -- never this service's entitlements.
+    # C-038/RUL-074: "a service taking layer-3 output from the identity provider is the collapse
+    # C-033 §4 forbids". The service expands these into its own entitlements through its `g` rows.
+    #
+    # A LIST because many grants compose as a UNION (RUL-076): a principal holding several holds
+    # the union of their expansions, overlaps collapsing. Not an intersection, not a precedence
+    # order. Grants are additive only -- the model has no deny effect, so a suspension can never be
+    # expressed as one; the local veto is the only subtractive lever.
+    #
     # Typed REQUIRED on purpose: were it optional and absent, every caller would resolve to "holds
     # nothing" and 403 -- a total outage wearing the costume of a permissions problem. Failing
     # validation instead makes that arrive as a loud 503 with a parse error in the logs.
-    entitlements: list[str]
+    grants: list[str]
     session_state: int
     device_trust_level: int          # 1 UNTRUSTED · 2 ATTESTED · 3 BOUND
     session_trust_level: int         # 1 AUTHENTICATED · 2 ELEVATED
@@ -177,7 +190,7 @@ class HttpTrustContextClient:
         except (SessionMiss, AuthzUnavailable):
             raise
         except ValidationError as e:
-            # The response shape changed under us -- most likely `entitlements` went missing. Loud,
+            # The response shape changed under us -- most likely `grants` went missing. Loud,
             # not silent: see the field comment above.
             await logger.aerror("trust-context response failed validation", exc_info=e)
             raise AuthzUnavailable("trust-context response did not match the expected shape") from e
@@ -223,7 +236,7 @@ def _error_code(body: Any) -> int | None:
     return raw if isinstance(raw, int) else None
 
 
-DEFAULT_ENTITLEMENTS_TTL = 300  # entitlements change rarely
+DEFAULT_GRANTS_TTL = 300        # grants are the slowest-moving of the three levels
 DEFAULT_TRUST_TTL = 60          # trust demotes on a timer and on device state -- keep it short
 DEFAULT_LAST_GOOD_TTL = 900     # only ever read when the source is down
 
@@ -276,36 +289,36 @@ class TrustContextCache:
     """The §10 field split over any `Cache`.
 
     `read` returns a context only when **both** halves are warm, so a demoted trust level can never
-    be masked by a still-valid entitlement entry.
+    be masked by a still-valid grants entry.
     """
 
     def __init__(
         self,
         cache: Cache,
         *,
-        entitlements_ttl: int = DEFAULT_ENTITLEMENTS_TTL,
+        grants_ttl: int = DEFAULT_GRANTS_TTL,
         trust_ttl: int = DEFAULT_TRUST_TTL,
         last_good_ttl: int = DEFAULT_LAST_GOOD_TTL,
     ) -> None:
         self._cache = cache
-        self._entitlements_ttl = entitlements_ttl
+        self._grants_ttl = grants_ttl
         self._trust_ttl = trust_ttl
         self._last_good_ttl = last_good_ttl
 
     async def read(self, session_ref: str) -> TrustContext | None:
-        entitlements_raw = await self._cache.get(f"ent:{session_ref}")
-        if entitlements_raw is None:
+        grants_raw = await self._cache.get(f"grants:{session_ref}")
+        if grants_raw is None:
             return None
         trust_raw = await self._cache.get(f"trust:{session_ref}")
         if trust_raw is None:
-            return None  # trust expired -> refetch, even though entitlements are still warm
-        return _merge(entitlements_raw, trust_raw)
+            return None  # trust expired -> refetch, even though grants are still warm
+        return _merge(grants_raw, trust_raw)
 
     async def write(self, context: TrustContext) -> None:
-        entitlements = json.dumps({
+        grants = json.dumps({
             "session_ref": context.session_ref,
             "user_ref": context.user_ref,
-            "entitlements": context.entitlements,
+            "grants": context.grants,
         })
         trust = json.dumps({
             "session_state": context.session_state,
@@ -315,7 +328,7 @@ class TrustContextCache:
             "client_ref": context.client_ref,
             "device_ref": context.device_ref,
         })
-        await self._cache.set(f"ent:{context.session_ref}", entitlements, self._entitlements_ttl)
+        await self._cache.set(f"grants:{context.session_ref}", grants, self._grants_ttl)
         await self._cache.set(f"trust:{context.session_ref}", trust, self._trust_ttl)
         await self._cache.set(
             f"lastgood:{context.session_ref}", context.model_dump_json(), self._last_good_ttl
@@ -332,9 +345,9 @@ class TrustContextCache:
             return None
 
 
-def _merge(entitlements_raw: str, trust_raw: str) -> TrustContext | None:
+def _merge(grants_raw: str, trust_raw: str) -> TrustContext | None:
     try:
-        merged: dict[str, Any] = {**json.loads(entitlements_raw), **json.loads(trust_raw)}
+        merged: dict[str, Any] = {**json.loads(grants_raw), **json.loads(trust_raw)}
         return TrustContext.model_validate(merged)
     except Exception:  # noqa: BLE001 -- a corrupt half is a miss; the source is one call away
         return None
