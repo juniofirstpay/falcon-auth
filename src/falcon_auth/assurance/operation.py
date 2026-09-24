@@ -272,6 +272,11 @@ class HttpOperationVerifier:
             and both plausible defaults are wrong somewhere: defaulting to ``"1"`` keeps sending
             a header the convention retired, and defaulting to ``None`` 400s against auth as
             deployed today. Neither failure is loud, so the host states it.
+
+            **TEMPORARY — tracked as falcon-auth#2.** When auth adopts C-039 this argument is
+            deleted rather than given a default, and the version rides in ``path_template``
+            alone (``/v1/internal/...``). ``None`` already means "send nothing", so a consumer
+            whose auth has moved can stop sending the header without waiting for that cleanup.
         """
         self._session_getter = session_getter
         self._path_template = path_template
