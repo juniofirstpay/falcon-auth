@@ -170,3 +170,70 @@ def test_the_cores_do_not_import_the_adapters():
         if rel.parts[0] != ADAPTERS and _reaches(path, ADAPTERS, ())
     ]
     assert not offenders, f"these cores reference the adapters layer: {offenders}"
+
+
+# ── A15: the ASGI server is optional ──────────────────────────────────────────
+
+
+def test_importing_the_package_does_not_import_an_asgi_server(monkeypatch):
+    """Issue #1 A15. `eastwest/mtls.py` imported uvicorn at module level, so `import
+    falcon_auth` pulled in an HTTP server -- paid for by every consumer that never serves one: a
+    worker resolving entitlements, a CLI, a test suite, a service behind a mesh sidecar that
+    terminates mTLS itself, anything on hypercorn or granian.
+
+    This is the property that silently regresses the next time somebody adds a convenience
+    re-export at the top of a package `__init__`, so it is asserted rather than assumed.
+    """
+    import sys
+
+    for name in [n for n in sys.modules if n.startswith(("falcon_auth", "uvicorn"))]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    import falcon_auth  # noqa: F401
+
+    assert "uvicorn" not in sys.modules, (
+        "importing falcon_auth pulled in an ASGI server; the protocol subclasses belong in "
+        "eastwest/uvicorn_protocols.py, reached lazily"
+    )
+
+
+def test_the_protocols_are_still_reachable_by_their_public_names():
+    """The lazy re-export keeps the API. PEP 562 `__getattr__` resolves on ACCESS, so the names
+    a consumer already imports keep working -- they simply pull uvicorn at that moment."""
+    import falcon_auth
+    from falcon_auth.eastwest import PeerCertH11Protocol as FromEastwest
+
+    assert falcon_auth.PeerCertH11Protocol is FromEastwest
+
+
+def test_accessing_the_protocols_is_what_imports_uvicorn(monkeypatch):
+    """The other half: the deferral is real, not an import that merely moved."""
+    import sys
+
+    for name in [n for n in sys.modules if n.startswith(("falcon_auth", "uvicorn"))]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    import falcon_auth
+
+    assert "uvicorn" not in sys.modules
+    falcon_auth.PeerCertH11Protocol
+    assert "uvicorn" in sys.modules
+
+
+def test_an_unknown_attribute_still_raises_attribute_error():
+    """A module-level `__getattr__` that swallowed unknown names would turn every typo into a
+    confusing failure somewhere else."""
+    import falcon_auth
+
+    with pytest.raises(AttributeError):
+        falcon_auth.NoSuchThing
+
+
+def test_only_the_protocols_module_imports_uvicorn():
+    """The structural version of the test above -- it does not depend on import order."""
+    offenders = [
+        str(rel)
+        for path, rel in _modules()
+        if rel.name != "uvicorn_protocols.py" and "uvicorn" in _imported_roots(path)
+    ]
+    assert not offenders, f"these modules import uvicorn: {offenders}"

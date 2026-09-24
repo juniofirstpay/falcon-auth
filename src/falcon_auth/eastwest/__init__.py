@@ -26,8 +26,6 @@ from .errors import (
     UnknownCNError,
 )
 from .mtls import (
-    PeerCertH11Protocol,
-    PeerCertHttpToolsProtocol,
     build_uvicorn_ssl_kwargs,
 )
 from .verifier import (
@@ -57,3 +55,30 @@ __all__ = (
     "build_uvicorn_ssl_kwargs",
     "peer_cn",
 )
+
+
+# ── the uvicorn protocols, resolved on access (PEP 562) ──────────────────────
+#
+# These two names SUBCLASS uvicorn, so importing them eagerly here would put an ASGI server on
+# the import path of every consumer -- including ones that never serve HTTP. Resolving them in
+# `__getattr__` keeps `falcon_auth.eastwest.PeerCertH11Protocol` working while `import falcon_auth` stays server-free.
+#
+# The trade, stated plainly: a missing uvicorn now fails at ACCESS rather than at import. That
+# is later than ideal, and it only reaches a consumer who asked for the uvicorn integration
+# without installing the extra -- who gets an ImportError naming it.
+_UVICORN_PROTOCOLS = ("PeerCertH11Protocol", "PeerCertHttpToolsProtocol")
+
+
+def __getattr__(name: str) -> object:
+    if name in _UVICORN_PROTOCOLS:
+        try:
+            from . import uvicorn_protocols
+        except ImportError as e:  # pragma: no cover - depends on env
+            raise ImportError(
+                f"{name} needs uvicorn, which is an optional dependency of falcon-auth. "
+                f"Install it with: pip install falcon-auth[uvicorn]"
+            ) from e
+        value = getattr(uvicorn_protocols, name)
+        globals()[name] = value  # cache: __getattr__ runs once per name
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

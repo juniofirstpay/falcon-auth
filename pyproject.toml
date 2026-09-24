@@ -27,7 +27,6 @@ classifiers = [
 ]
 dependencies = [
   "falcon >= 4.0",
-  "uvicorn >= 0.30",
   "cryptography >= 42",
   "pyjwt >= 2.9",
   "aiohttp >= 3.9",
@@ -40,7 +39,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest >= 8", "pytest-asyncio >= 0.24"]
+dev = ["pytest >= 8", "pytest-asyncio >= 0.24", "uvicorn >= 0.30"]
+# Needed only to terminate mTLS in-process: `PeerCertH11Protocol` and its httptools sibling
+# subclass uvicorn's HTTP protocols to inject the peer certificate into the ASGI scope, which
+# uvicorn does not do itself. A consumer behind a mesh sidecar, on another server, or not
+# serving HTTP at all (a worker, a CLI) needs none of it -- see eastwest/uvicorn_protocols.py.
+uvicorn = ["uvicorn >= 0.30"]
 
 [tool.pytest.ini_options]
 addopts = "-rSA"

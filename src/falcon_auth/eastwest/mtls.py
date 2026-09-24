@@ -18,13 +18,21 @@ that lack a cert.
 returns an empty dict → uvicorn stays plaintext, existing dev+tests unchanged
 in every consuming repo.
 
-**uvicorn does not populate the ASGI scope with peer-cert info.** The
-protocol subclasses below capture the peer cert on ``connection_made`` and
-intercept every ``self.scope = {...}`` assignment (both httptools' per-request
-``on_message_begin`` and h11's inline construction inside ``handle_events``)
-so ``scope["extensions"]["tls"]["peer_cert_der"]`` is present before the ASGI
-task runs. Pipelined requests each get their own injection since each triggers
-a fresh scope assignment.
+**uvicorn does not populate the ASGI scope with peer-cert info.** The protocol
+subclasses in :mod:`falcon_auth.eastwest.uvicorn_protocols` capture the peer cert
+on ``connection_made`` and intercept every ``self.scope = {...}`` assignment (both
+httptools' per-request ``on_message_begin`` and h11's inline construction inside
+``handle_events``) so ``scope["extensions"]["tls"]["peer_cert_der"]`` is present
+before the ASGI task runs. Pipelined requests each get their own injection since
+each triggers a fresh scope assignment.
+
+**THIS MODULE IMPORTS NO UVICORN.** The subclasses live next door because a base
+class cannot be a deferred import, and keeping them here made ``import
+falcon_auth`` pull in an ASGI server -- paid for by every consumer that never
+serves HTTP. Everything with behaviour is :class:`_PeerCertScopeInjector` below,
+which needs no uvicorn and is tested without it; what moved is two class
+statements. ``build_uvicorn_ssl_kwargs`` is uvicorn-SHAPED but uvicorn-free: it
+touches only :mod:`ssl` and returns a dict of kwargs.
 
 **Deferred-with-trigger**: (a) a mesh sidecar terminating mTLS → posture B
 (trust a proxy-injected identity header via a a peer-CN adapter);
@@ -36,17 +44,6 @@ from __future__ import annotations
 
 import ssl
 from typing import Any
-
-from uvicorn.protocols.http.h11_impl import H11Protocol
-
-# httptools is an optional uvicorn extra (``uvicorn[standard]``) and
-# ``httptools_impl`` imports it unconditionally at module load. Guard the
-# import so consuming repos that only ship bare ``uvicorn`` still work.
-try:
-    from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
-except ImportError:  # pragma: no cover - depends on env
-    HttpToolsProtocol = None  # type: ignore[misc,assignment]
-
 
 def build_uvicorn_ssl_kwargs(
     cert_file: str,
@@ -117,33 +114,4 @@ class _PeerCertScopeInjector:
             _inject_tls_extension(value, self._peer_cert_der)
 
 
-class PeerCertH11Protocol(_PeerCertScopeInjector, H11Protocol):
-    """H11 with peer-cert DER injected into ASGI scope.
-
-    Uvicorn selects h11 when ``httptools`` isn't installed (bare
-    ``pip install uvicorn`` — not ``uvicorn[standard]``). Only used when the
-    serve listener is mTLS (``cert_file`` set); otherwise uvicorn's default
-    protocol runs and the extension is absent.
-    """
-
-
-if HttpToolsProtocol is not None:  # pragma: no cover - depends on env
-
-    class PeerCertHttpToolsProtocol(_PeerCertScopeInjector, HttpToolsProtocol):
-        """httptools counterpart of :class:`PeerCertH11Protocol`.
-
-        Only defined when the ``httptools`` extra is installed (via
-        ``uvicorn[standard]``); use this in place of
-        :class:`PeerCertH11Protocol` when uvicorn would otherwise pick
-        httptools as the default HTTP protocol.
-        """
-
-else:
-    PeerCertHttpToolsProtocol = None  # type: ignore[misc]
-
-
-__all__ = (
-    "build_uvicorn_ssl_kwargs",
-    "PeerCertHttpToolsProtocol",
-    "PeerCertH11Protocol",
-)
+__all__ = ("build_uvicorn_ssl_kwargs",)

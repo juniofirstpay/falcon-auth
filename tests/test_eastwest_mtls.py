@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import ssl
 
+# The split A15 made: everything with behaviour stays in `mtls` and needs no uvicorn; only the
+# two concrete protocol subclasses moved, because a base class cannot be a deferred import.
 from falcon_auth.eastwest.mtls import (
-    PeerCertH11Protocol,
     _capture_peer_cert,
     _inject_tls_extension,
     build_uvicorn_ssl_kwargs,
 )
+from falcon_auth.eastwest.uvicorn_protocols import PeerCertH11Protocol
 
 
 # ─── build_uvicorn_ssl_kwargs ────────────────────────────────────────────────

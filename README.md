@@ -22,6 +22,14 @@ falcon-auth = { git = "https://github.com/juniofirstpay/falcon-auth.git", ref = 
 
 Pin a `ref`. This package sits on the authorization path of every consuming service; a push reaching production unannounced is the failure mode it exists to design away.
 
+Add the `uvicorn` extra **only** if this service terminates mTLS in-process:
+
+```
+falcon-auth = { git = "...", ref = "<sha>", extras = ["uvicorn"] }
+```
+
+`PeerCertH11Protocol` and its httptools sibling subclass uvicorn's HTTP protocols to inject the peer certificate into the ASGI scope, which uvicorn does not do itself. A service behind a mesh sidecar, on another server, or not serving HTTP at all needs none of it — and `import falcon_auth` does not pull an ASGI server in.
+
 ---
 
 ## The four parts
@@ -77,7 +85,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 288 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 293 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
