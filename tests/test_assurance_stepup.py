@@ -205,3 +205,25 @@ async def test_the_hook_absorbs_stray_decorator_kwargs():
     hook = require_elevated(client, lambda req: ("sess-1", "user-1"))
     await hook(_Req(None), None, None, {}, is_async=True)
     assert client.calls == 1
+
+
+async def test_a_revoked_session_cannot_pass_a_step_up_gate():
+    """Issue #1 A3, the assurance half. Auth answers 200 for a revoked session, so without this
+    a logged-out session could pass the gate on a still-elevated trust level."""
+    import pytest
+
+    from falcon_auth.errors import SessionMiss
+    from falcon_auth.trustcontext import SESSION_STATE_REVOKED, TrustContext
+
+    class _Revoked:
+        async def fetch(self, session_ref, *, user_ref):
+            return TrustContext.model_validate({
+                "session_ref": "sess-1", "user_ref": "user-1",
+                "session_state": SESSION_STATE_REVOKED,
+                "device_trust_level": 3,
+                "session_trust_level": SESSION_TRUST_ELEVATED,
+                "grants": ["RETAIL_USER"],
+            })
+
+    with pytest.raises(SessionMiss):
+        await check_session_elevated(_Revoked(), "sess-1", "user-1")

@@ -8,6 +8,7 @@ import pytest
 
 from falcon_auth.entitlement.enforcer import build_enforcer
 from falcon_auth.entitlement.flatness import (
+    check_register_disjoint,
     FlatnessError,
     UnregisteredGrant,
     check_flatness,
@@ -118,3 +119,40 @@ def test_omitting_the_register_skips_only_that_check():
 def test_todays_configuration_passes_both():
     """No expansion, empty register -- what every service runs right now."""
     verify_policy(REGISTRY, grant_register=[])
+
+
+# ── A2: the register, not just the expansion ─────────────────────────────────
+
+
+def test_a_grant_named_like_an_entitlement_is_refused_even_with_no_expansion():
+    """Issue #1 A2, the issue's own repro.
+
+    check_flatness compares the EXPANSION'S KEYS against the entitlement vocabulary. With an
+    empty expansion that set is empty, so the collision could never be found -- and an empty
+    expansion is the state every service is in today, because nothing grants yet.
+
+    casbin links name1 == name2, so the grant then opened its own routes with no `g` row: a
+    coarse estate-wide grant reaching layer 3 directly, which is the collapse C-033 forbids.
+    """
+    with pytest.raises(FlatnessError, match="grant register AND in this service"):
+        verify_policy(
+            {"payments:read": "PAYMENT_READ"}, None, grant_register=["PAYMENT_READ"]
+        )
+
+
+def test_the_collapse_the_check_prevents_is_real():
+    """The other half of the repro: without the check, the grant is allowed end to end."""
+    e = build_enforcer({"payments:read": "PAYMENT_READ"})
+    assert e.allows(["PAYMENT_READ"], "payments:read"), (
+        "casbin's name1 == name2 link is what makes A2 exploitable -- pinned so the check is "
+        "never mistaken for belt-and-braces"
+    )
+
+
+def test_a_disjoint_register_still_passes():
+    verify_policy({"payments:read": "PAYMENT_READ"}, None, grant_register=["RETAIL_USER"])
+
+
+def test_the_register_check_is_skipped_without_a_register():
+    """`None` remains the escape hatch for a host with no copy of GRANTS.md."""
+    verify_policy({"payments:read": "PAYMENT_READ"}, None)

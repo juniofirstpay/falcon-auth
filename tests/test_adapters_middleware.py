@@ -278,3 +278,41 @@ def test_the_refusal_branches_raise_a_catchable_wiring_error():
         import asyncio
 
         asyncio.run(mw.process_resource(Req(), None, Echo(), {}))
+
+
+def test_at_most_one_secondary_is_verified():
+    """Issue #1 A6. C-038 Q88: the wrong-plane lookup verifies AT MOST ONE secondary.
+
+    The budget is on VERIFICATIONS, not lookups. An authenticator returning None did no
+    cryptographic work -- it looked for a header and found none -- so the search continues past
+    it. One that RAISES did the work, so it is the one secondary allowed and the search stops.
+
+    Without the bound, every unauthenticated request verified every other method's credential:
+    work an attacker controls, and more crypto than the step needs to answer "is this caller on
+    another plane".
+    """
+    verified = []
+
+    def counting(header, name):
+        async def attempt(req):
+            value = req.get_header(header)
+            if value is None:
+                return None
+            verified.append(name)
+            raise Unauthenticated(f"invalid {name}")
+
+        return attempt
+
+    authenticators = {
+        planes.JWT: authenticator(JWT_HEADER, "jwt"),
+        planes.MTLS: counting(MTLS_HEADER, "mtls"),
+        planes.HMAC: counting(HMAC_HEADER, "hmac"),
+        planes.ONE_SHOT_TOKEN: counting(ONESHOT_HEADER, "oneshot"),
+    }
+    client, _, _ = build(planes.USER, authenticators=authenticators)
+    r = client.simulate_get(
+        "/v1/thing",
+        headers={MTLS_HEADER: "bad", HMAC_HEADER: "bad", ONESHOT_HEADER: "bad"},
+    )
+    assert r.status_code == 401
+    assert len(verified) == 1, f"verified {verified}; Q88 allows one secondary"

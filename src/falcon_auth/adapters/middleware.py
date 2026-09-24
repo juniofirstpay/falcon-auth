@@ -228,12 +228,17 @@ class PlaneAuthenticationMiddleware:
             try:
                 principal = await self._authenticators[candidate](req)
             except Exception:
-                # Present but invalid. Not a mismatch -- see the module docstring. Swallowed so
-                # the search continues; the caller still ends at step 5's 401 unless something
-                # else is genuinely valid.
-                continue
+                # Present but INVALID. That is a verification -- it did cryptographic work -- so
+                # by C-038 Q88 it is the one secondary this step is allowed, and the search stops
+                # here. It is also not a mismatch: garbage is a caller with no usable credential,
+                # which is step 5's 401. See the module docstring.
+                return None
             if principal is not None:
                 return candidate, owning_plane
+            # `None` means no credential of THIS kind is present. Nothing was verified, so this
+            # does not count against Q88's budget and the search continues. Bounding on lookups
+            # rather than verifications would end the search at the first method the caller
+            # simply did not use -- which, iterating alphabetically, is usually the first one.
         return None
 
     def _refuse_wrong_plane(

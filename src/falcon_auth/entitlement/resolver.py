@@ -60,9 +60,11 @@ from structlog import get_logger
 from ..errors import (
     AuthzUnavailable,
     CapabilityDenied,
+    SessionMiss,
 )
 from ..principal import Principal
 from ..trustcontext import (
+    SESSION_STATE_ENABLED,
     TrustContext,
     TrustContextCache,
     TrustContextClient,
@@ -136,6 +138,7 @@ class AuthServiceResolver:
             raise CapabilityDenied("token carries no session reference")
 
         context = await self._context(str(session_ref), str(user.id), consequential=consequential)
+        _assert_session_live(context)
         return self._principal(context)
 
     def _principal(self, context: TrustContext) -> Principal:
@@ -183,6 +186,24 @@ class AuthServiceResolver:
 
         await self._cache.write(context)
         return context
+
+
+def _assert_session_live(context: TrustContext) -> None:
+    """Refuse a session that is not ENABLED.
+
+    Auth does not 404 a revoked session. `revoke` sets `state = REVOKED`, and the trust-context
+    read filters on `is_active` only -- so it answers **200** with `session_state = 2` and every
+    other field populated. A consumer that reads only the trust fields therefore keeps serving a
+    session the user has logged out of, or that an operator has killed.
+
+    `SessionMiss`, not a new error: from the caller's side a revoked session IS gone, and the
+    recovery is identical -- re-authenticate, do not retry, do not raise a challenge.
+    """
+    if context.session_state != SESSION_STATE_ENABLED:
+        raise SessionMiss(
+            "session is not enabled",
+            session_state=context.session_state,
+        )
 
 
 class GrantAllResolver:

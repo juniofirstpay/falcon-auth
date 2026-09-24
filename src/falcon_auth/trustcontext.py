@@ -87,6 +87,8 @@ __all__ = (
     "HttpTrustContextClient",
     "NullCache",
     "RedisCache",
+    "SESSION_STATE_ENABLED",
+    "SESSION_STATE_REVOKED",
     "SESSION_TRUST_AUTHENTICATED",
     "SESSION_TRUST_ELEVATED",
     "TrustContext",
@@ -99,6 +101,15 @@ logger = get_logger("falcon_auth.trustcontext")
 # Trust tiers as the auth service reports them. Named here, beside the model whose fields carry
 # them, so no service compares against a bare integer -- `session_trust_level == 2` is unreadable
 # at the call site and unsearchable when the vocabulary changes.
+#: `Session.state` values. A session that is not ENABLED is not a session anybody may act on.
+#:
+#: Read by the resolver and by step-up, because auth does NOT 404 a revoked session: revoke sets
+#: `state = REVOKED`, while the trust-context read filters on `is_active` only and answers 200
+#: with `session_state = 2`. Without this check a revoked session resolves as live and keeps
+#: transacting -- revocation would not take effect for any consumer of this package.
+SESSION_STATE_ENABLED: int = 1
+SESSION_STATE_REVOKED: int = 2
+
 SESSION_TRUST_AUTHENTICATED: int = 1
 SESSION_TRUST_ELEVATED: int = 2
 

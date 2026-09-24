@@ -13,6 +13,8 @@ from falcon_auth.errors import AuthzUnavailable, CapabilityDenied, SessionMiss
 from falcon_auth.principal import Principal
 from falcon_auth.trustcontext import (
     NullCache,
+    SESSION_STATE_ENABLED,
+    SESSION_STATE_REVOKED,
     SESSION_TRUST_AUTHENTICATED,
     TrustContext,
     TrustContextCache,
@@ -41,16 +43,19 @@ CTX = {
 
 
 class _Client:
-    def __init__(self, grants=("RETAIL_USER",), raises=None):
+    def __init__(self, grants=("RETAIL_USER",), raises=None, state=SESSION_STATE_ENABLED):
         self._grants = list(grants)
         self._raises = raises
+        self._state = state
         self.calls = 0
 
     async def fetch(self, session_ref: str, *, user_ref: str) -> TrustContext:
         self.calls += 1
         if self._raises is not None:
             raise self._raises
-        return TrustContext.model_validate({**CTX, "grants": self._grants})
+        return TrustContext.model_validate(
+            {**CTX, "grants": self._grants, "session_state": self._state}
+        )
 
 
 class _User:
@@ -351,3 +356,28 @@ async def test_grant_all_reports_no_trust_posture():
     pass in dev on evidence that does not exist."""
     p = await GrantAllResolver(["ORDER_READ"]).resolve(_User())
     assert p.session_trust_level is None
+
+
+# ── A3: a revoked session is not live ────────────────────────────────────────
+
+
+async def test_a_revoked_session_does_not_resolve():
+    """Issue #1 A3.
+
+    Auth does NOT 404 a revoked session: revoke sets `state = REVOKED`, and the trust-context
+    read filters on `is_active` only -- so it answers 200 with session_state = 2 and every other
+    field populated. `session_state` was declared on the model and read nowhere, so a session the
+    user had logged out of kept resolving and kept transacting.
+
+    SessionMiss rather than a new error: from the caller's side a revoked session IS gone, and
+    the recovery is the same -- re-authenticate, do not retry.
+    """
+    resolver = _resolver(_Client(state=SESSION_STATE_REVOKED))
+    with pytest.raises(SessionMiss):
+        await resolver.resolve(_User(sid="sess-1"))
+
+
+async def test_an_enabled_session_still_resolves():
+    resolver = _resolver(_Client(state=SESSION_STATE_ENABLED))
+    p = await resolver.resolve(_User(sid="sess-1"))
+    assert p.session_ref == "sess-1"

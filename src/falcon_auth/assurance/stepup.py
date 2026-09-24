@@ -43,8 +43,9 @@ consumed, body-bound challenge and is not implemented here.
 
 from __future__ import annotations
 
-from ..errors import StepUpRequired
+from ..errors import SessionMiss, StepUpRequired
 from ..trustcontext import (
+    SESSION_STATE_ENABLED,
     SESSION_TRUST_ELEVATED,
     TrustContext,
     TrustContextClient,
@@ -76,6 +77,12 @@ async def check_session_elevated(
     -- to tell the client how long it has, say -- does not pay for a second fetch.
     """
     context = await client.fetch(session_ref, user_ref=user_ref)
+
+    # Auth answers 200 for a REVOKED session -- revoke sets `state`, and the trust-context read
+    # filters on `is_active` only. Without this, a logged-out session could pass a step-up gate
+    # on a still-elevated trust level.
+    if context.session_state != SESSION_STATE_ENABLED:
+        raise SessionMiss("session is not enabled", session_state=context.session_state)
 
     # Project even though a fresh read arrives projected by auth. It is free, and the
     # direction it can be wrong in is the safe one: if auth ever returned an elevated

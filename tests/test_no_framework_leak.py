@@ -42,6 +42,33 @@ def _imported_names(path: pathlib.Path) -> set[str]:
     return names
 
 
+def _reaches(path: pathlib.Path, module: str, symbols: tuple[str, ...]) -> bool:
+    """Whether this file imports ``module``, in ANY of the forms Python allows.
+
+    Issue #1 A5: the guards matched only dotted module paths, so three spellings walked straight
+    past them and each mutation left the test green:
+
+        from ..entitlement import enforcer          the module as a NAME, not a path
+        from ..entitlement import CapabilityEnforcer   the symbol, module never named
+        from .. import adapters                     the package as a name
+
+    A boundary test that can be stepped over by changing import style is decoration. This reads
+    both the module path and the imported NAMES.
+    """
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom):
+            if node.module and module in node.module.split("."):
+                return True
+            for alias in node.names:
+                if alias.name == module or alias.name in symbols:
+                    return True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if module in alias.name.split("."):
+                    return True
+    return False
+
+
 def _imported_roots(path: pathlib.Path) -> set[str]:
     """Top-level package names this module imports, deferred imports included.
 
@@ -126,7 +153,7 @@ def test_only_entitlement_imports_the_enforcer():
     for path, rel in _modules():
         if rel.parts[0] not in establishers:
             continue
-        if any("enforcer" in name for name in _imported_names(path)):
+        if _reaches(path, "enforcer", ("CapabilityEnforcer", "build_enforcer")):
             offenders.append(str(rel))
     assert not offenders, (
         f"these modules reach for the capability gate: {offenders}. Establishing identity and "
@@ -140,7 +167,6 @@ def test_the_cores_do_not_import_the_adapters():
     offenders = [
         str(rel)
         for path, rel in _modules()
-        if rel.parts[0] != ADAPTERS
-        and any(ADAPTERS in name.lstrip(".").split(".") for name in _imported_names(path))
+        if rel.parts[0] != ADAPTERS and _reaches(path, ADAPTERS, ())
     ]
     assert not offenders, f"these cores reference the adapters layer: {offenders}"
