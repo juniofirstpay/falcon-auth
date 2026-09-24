@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from falcon_auth import (
+    build_allow_list,
     MissingClientCertError,
     MissingScopeError,
     Principal,
@@ -192,3 +193,67 @@ def test_register_error_handlers_binds_svcplane_error_base_class():
     # here we just assert the app accepted the registration without error and
     # that add_error_handler was called (proxied through the app instance).
     assert isinstance(app, falcon.asgi.App)
+
+# ── every hook family absorbs decorator kwargs ────────────────────────────────
+
+
+@pytest.mark.parametrize("with_is_async", [True, False])
+def test_is_async_does_not_turn_a_denial_into_a_500(with_is_async):
+    """`falcon.before(action, *args, **kwargs)` forwards EVERY extra keyword to the hook, and
+    callers across this ecosystem pass `is_async=True` believing Falcon consumes it. Falcon 3
+    did; Falcon 4 detects hooks automatically and the parameter is gone.
+
+    A strict signature therefore raises TypeError and answers 500 where a 401 belongs -- and
+    the failure is invisible until someone writes the form the whole estate writes. The
+    east-west hooks shipped strict from the A1 port and answered 500 with is_async=True and
+    401 without it; this pins both to 401.
+    """
+    import falcon
+    import falcon.asgi
+    import falcon.testing
+
+    from falcon_auth.eastwest.errors import SvcPlaneError
+
+    verifier = Verifier(build_allow_list([
+        {"cn": "peer.internal", "kind": "SERVICE", "source": "p", "scopes": ["x:y"]}
+    ]))
+    gate = require_service_scope(verifier, "x:y")
+
+    if with_is_async:
+        class Resource:
+            @falcon.before(gate, is_async=True)
+            async def on_get(self, req, resp):
+                resp.media = {"ok": True}
+    else:
+        class Resource:
+            @falcon.before(gate)
+            async def on_get(self, req, resp):
+                resp.media = {"ok": True}
+
+    async def render(req, resp, ex, params):
+        resp.status = ex.http_status
+        resp.media = ex.json()
+
+    app = falcon.asgi.App()
+    app.add_error_handler(SvcPlaneError, render)
+    app.add_route("/thing", Resource())
+
+    result = falcon.testing.TestClient(app).simulate_get("/thing")
+    assert result.status_code == 401, "no client cert -- a denial, never a crash"
+
+
+def test_every_hook_factory_produces_a_kwarg_tolerant_hook():
+    """The property, asserted structurally so a new hook cannot quietly ship strict."""
+    import inspect
+
+    from falcon_auth.adapters import hooks as hooks_module
+
+    verifier = Verifier(build_allow_list([]))
+    produced = {
+        "require_service_scope": hooks_module.require_service_scope(verifier, "x:y"),
+        "require_callback": hooks_module.require_callback(verifier),
+    }
+    for name, hook in produced.items():
+        kinds = {p.kind for p in inspect.signature(hook).parameters.values()}
+        assert inspect.Parameter.VAR_KEYWORD in kinds, f"{name} rejects stray kwargs"
+        assert inspect.Parameter.VAR_POSITIONAL in kinds, f"{name} rejects stray args"

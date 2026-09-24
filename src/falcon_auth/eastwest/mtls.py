@@ -139,7 +139,7 @@ if HttpToolsProtocol is not None:  # pragma: no cover - depends on env
         """
 
 else:
-    PeerCertHttpToolsProtocol = None  # type: ignore[misc,assignment]
+    PeerCertHttpToolsProtocol = None  # type: ignore[misc]
 
 
 __all__ = (

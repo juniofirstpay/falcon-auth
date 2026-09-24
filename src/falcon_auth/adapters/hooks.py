@@ -70,6 +70,8 @@ def require_service_scope(verifier: Verifier, scope: str) -> HookFn:
         resp: falcon.asgi.Response,
         resource: object,
         params: dict[str, Any],
+        *_a: Any,
+        **_kw: Any,
     ) -> None:
         principal = verifier.authenticate(req.scope)
         verifier.require_scope(principal, scope)
@@ -91,6 +93,8 @@ def require_callback(verifier: Verifier) -> HookFn:
         resp: falcon.asgi.Response,
         resource: object,
         params: dict[str, Any],
+        *_a: Any,
+        **_kw: Any,
     ) -> None:
         principal = verifier.authenticate(req.scope)
         setattr(req.context, _PRINCIPAL_CTX_ATTR, principal)

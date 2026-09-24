@@ -7,19 +7,22 @@ Named `adapters` rather than `falcon` deliberately: a subpackage called `falcon`
 package that imports `falcon` resolves correctly under Python 3's absolute imports but reads
 ambiguously and confuses tooling.
 
-**The two hook families disagree about stray keyword arguments, and that is not yet
-reconciled.** `falcon.before(action, *args, **kwargs)` forwards every extra keyword to the hook,
+**Every hook here absorbs stray keyword arguments, and that is deliberate.**
+`falcon.before(action, *args, **kwargs)` forwards every extra keyword straight to the hook,
 including the `is_async=True` that callers across this ecosystem still pass believing Falcon
 consumes it — Falcon 3 did; Falcon 4 detects hooks automatically and the parameter is gone.
 
-    east-west hooks (ported here)   STRICT `(req, resp, resource, params)`
-                                    passing `is_async=True` raises TypeError — a 500 on a
-                                    gated route. Consumers must omit it.
-    entitlement hooks (not yet)     absorb `*_a, **_kw` and read nothing from them
+A strict signature therefore raises `TypeError` and answers **500 on a gated route**, where a
+401 or 403 belongs. Reproduced on Falcon 4.2: the same east-west route answers 500 with
+`is_async=True` and 401 without it, so the failure is invisible until someone writes the form
+the whole estate writes.
 
-The east-west hooks are strict **because that is how they behave today**, and A1 is a
-behaviour-identical port. Making the two families agree is a deliberate later change, not a
-tidy-up smuggled into the port.
+The east-west hooks shipped strict because A1 was a behaviour-identical port and reconciling
+the families was recorded as a later change rather than a tidy-up smuggled into the port. This
+is that change; all four now take `*_a, **_kw`.
+
+Nothing is read from them, on purpose: a gate that varied with decorator kwargs would be a
+second, invisible configuration surface.
 
 Modules:
     hooks.py            require (entitlement) · require_elevated (assurance)
