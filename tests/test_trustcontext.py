@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pydantic
 import pytest
 
+from falcon_auth.errors import SessionMiss
 from falcon_auth.trustcontext import (
     DEFAULT_LAST_GOOD_TTL,
     SESSION_TRUST_AUTHENTICATED,
@@ -270,25 +271,53 @@ async def test_the_api_version_is_required_with_no_default():
         )
 
 
-async def test_the_cache_write_survives_either_clients_ttl_keyword():
-    """Issue #1 A10. redis-asyncio spells expiry `ex=`; aiocache spells it `ttl=`. The blanket
-    except swallowed the resulting TypeError, so the write was silently lost and the cache
-    quietly stopped being a cache -- nothing failed, because a cache that always misses still
-    authorizes correctly."""
+async def test_an_aiocache_client_satisfies_the_protocol_directly():
+    """Issue #4. The protocol IS the contract: `get(key)` and `set(key, value, ttl)`, ttl in
+    seconds. aiocache's SimpleMemoryCache binds both positionally, so a consumer on the
+    platform's Redis stack passes its own client straight in -- no adapter, no wrapper.
+    """
+    aiocache = pytest.importorskip("aiocache")
+
+    cache = TrustContextCache(aiocache.SimpleMemoryCache())
+    await cache.write(_ctx(session_trust_level=SESSION_TRUST_ELEVATED))
+    back = await cache.read_last_good("sess-1")
+
+    assert back is not None
+    assert back.grants == ["RETAIL_USER"]
+    assert back.session_trust_level == SESSION_TRUST_ELEVATED
+
+
+async def test_wrapping_an_aiocache_client_in_rediscache_fails_loudly():
+    """The bug this closes. RedisCache calls `set(..., ex=ttl)`; an aiocache client spells it
+    `ttl=`, so the TypeError was swallowed by the blanket except and the write was SILENTLY
+    LOST. Nothing failed -- a cache that always misses still authorizes correctly -- it just
+    never served a last-good answer during an outage, which is the one moment it exists for.
+
+    A transport failure stays a miss. A signature mismatch is a wiring error and says so.
+    """
+    aiocache = pytest.importorskip("aiocache")
+
     from falcon_auth.trustcontext import RedisCache
 
-    class _AiocacheStyle:
+    with pytest.raises(TypeError, match="does not accept `ex=`"):
+        await RedisCache(aiocache.SimpleMemoryCache(), prefix="orders").set("k", "v", 60)
+
+
+async def test_a_redis_asyncio_style_client_still_works():
+    """RedisCache remains what it always was -- the adapter for a redis-asyncio client, whose
+    `set` spells the expiry `ex=`."""
+    from falcon_auth.trustcontext import RedisCache
+
+    class _RedisPyStyle:
         def __init__(self):
             self.stored = {}
 
-        async def set(self, key, value, ttl=None):
-            if ttl is None:
-                raise TypeError("unexpected keyword 'ex'")
-            self.stored[key] = (value, ttl)
+        async def set(self, key, value, ex=None):
+            self.stored[key] = (value, ex)
 
-    client = _AiocacheStyle()
+    client = _RedisPyStyle()
     await RedisCache(client, prefix="orders").set("k", "v", 60)
-    assert client.stored == {"orders:k": ("v", 60)}, "the aiocache client received the write"
+    assert client.stored == {"orders:k": ("v", 60)}
 
 
 async def test_a_real_transport_failure_is_still_swallowed_to_a_miss():
@@ -301,3 +330,40 @@ async def test_a_real_transport_failure_is_still_swallowed_to_a_miss():
             raise ConnectionError("redis down")
 
     await RedisCache(_Down(), prefix="orders").set("k", "v", 60)  # no raise
+
+
+@pytest.mark.parametrize("status", [404, 410])
+async def test_a_gone_session_is_a_denial_not_an_outage(status):
+    """Issue #5, ask 1. 410 GONE is what auth's owner returns for a session that ended, and it
+    was falling through to the generic branch -- answering AuthzUnavailable, which tells the
+    client to retry with backoff a request that can never succeed.
+
+    404 and 410 differ only in whether the session ever existed. That is not a distinction the
+    caller can act on: both mean re-authenticate.
+    """
+    from falcon_auth.trustcontext import HttpTrustContextClient
+
+    class _Resp:
+        def __init__(self, status):
+            self.status = status
+
+        async def json(self):
+            return {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def get(self, path, **kw):
+            return _Resp(status)
+
+    client = HttpTrustContextClient(
+        lambda: _Session(),  # type: ignore[arg-type,return-value]
+        path_template="/x/{session_ref}",
+        api_version="1",
+    )
+    with pytest.raises(SessionMiss):
+        await client.fetch("sess-1", user_ref="user-1")

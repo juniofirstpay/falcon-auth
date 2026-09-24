@@ -253,8 +253,15 @@ class HttpTrustContextClient:
             body = None
         code = _error_code(body)
 
-        if response.status == 404 or code == _AUTH_CODE_SESSION_MISS:
-            # A logged-out or foreign session. DENY -- the client must re-authenticate, not retry.
+        if response.status in (404, 410) or code == _AUTH_CODE_SESSION_MISS:
+            # A logged-out, revoked or foreign session. DENY -- the client must re-authenticate,
+            # not retry.
+            #
+            # 410 GONE is the status auth's owner expects for a session that ended, and it is
+            # emphatically not an outage: falling through to the generic branch below would
+            # answer AuthzUnavailable and tell the client to retry with backoff a request that
+            # can never succeed. 404 and 410 differ only in whether the session ever existed,
+            # which is not a distinction the caller can act on -- both mean re-authenticate.
             raise SessionMiss("session is not live, or is not owned by this subject")
         if response.status == 403:
             # OUR certificate lacks `trust:read`. A deployment fault; reporting it as a user denial
@@ -287,6 +294,25 @@ DEFAULT_LAST_GOOD_TTL = 900     # only ever read when the source is down
 
 
 class Cache(Protocol):
+    """The only contract. The consumer injects one; the package never constructs a client.
+
+    Two async methods, and ``ttl`` in **seconds**::
+
+        async def get(key)              -> the stored string, or None
+        async def set(key, value, ttl)  -> None
+
+    **An aiocache client satisfies this directly** -- verified against `aiocache` 0.12.3, whose
+    ``SimpleMemoryCache.set(key, value, ttl=..., ...)`` and ``get(key, default=None, ...)``
+    both bind positionally. So a consumer on the platform's Redis stack passes its own client
+    straight in::
+
+        TrustContextCache(aiocache.Cache(aiocache.Cache.REDIS, ...))
+
+    No adapter, no wrapper. :class:`RedisCache` below exists only for a **redis-asyncio**
+    client, whose ``set`` spells the expiry ``ex=`` rather than ``ttl=``; if your client already
+    matches this protocol you do not need it.
+    """
+
     async def get(self, key: str) -> str | None: ...
     async def set(self, key: str, value: str, ttl: int) -> None: ...
 
@@ -328,29 +354,32 @@ class RedisCache:
             return None
 
     async def set(self, key: str, value: str, ttl: int) -> None:
-        """Write with a TTL, tolerating either client's expiry keyword.
+        """Write with a TTL, using redis-asyncio's ``ex=`` spelling.
 
-        redis-asyncio spells it ``ex=``; aiocache spells it ``ttl=``. The class swallows every
-        failure to a miss, which is right for a READ -- a cache is an optimisation and a service
-        should get slower, not start refusing people -- but on a WRITE it meant the wrong keyword
-        raised `TypeError`, was swallowed, and the entry silently never existed. A cache that
-        always misses still authorizes correctly, so nothing fails; it just quietly stops being
-        a cache.
+        A TRANSPORT failure is swallowed to a miss, which is right: a cache is an optimisation,
+        and if redis is down the service should get slower rather than start refusing people.
 
-        So the fallback is explicit rather than incidental: try the redis-py spelling, and on a
-        `TypeError` -- which is the signature mismatch, not a transport failure -- try the
-        aiocache one before giving up.
+        A **signature** mismatch is not swallowed. Passing a client whose ``set`` does not take
+        ``ex=`` -- an aiocache client, which spells it ``ttl=`` -- used to raise `TypeError`
+        inside the blanket except, so the write was silently lost and the cache quietly stopped
+        being one. Nothing failed, because a cache that always misses still authorizes
+        correctly; it just never served a single last-good answer during an outage, which is the
+        one moment it exists for.
+
+        That is a wiring error, and it now says so. Note the fix is not to teach this class a
+        second dialect: an aiocache client already satisfies :class:`Cache` directly, so it
+        should be passed straight to :class:`TrustContextCache` rather than wrapped in this.
         """
         try:
             await self._client.set(self._key(key), value, ex=ttl)
-            return None
-        except TypeError:
-            pass  # not this client's keyword; fall through rather than swallow
-        except Exception:  # noqa: BLE001 -- see the class docstring
-            return None
-        try:
-            await self._client.set(self._key(key), value, ttl=ttl)
-        except Exception:  # noqa: BLE001
+        except TypeError as e:
+            raise TypeError(
+                f"{type(self._client).__name__}.set() does not accept `ex=` -- RedisCache is "
+                f"for a redis-asyncio client. A client that spells the expiry `ttl=` (aiocache) "
+                f"already satisfies the Cache protocol: pass it to TrustContextCache directly "
+                f"instead of wrapping it in RedisCache"
+            ) from e
+        except Exception:  # noqa: BLE001 -- a transport failure is a miss; see the class docstring
             return None
 
 

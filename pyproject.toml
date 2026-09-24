@@ -39,7 +39,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest >= 8", "pytest-asyncio >= 0.24", "uvicorn >= 0.30"]
+dev = ["pytest >= 8", "pytest-asyncio >= 0.24", "uvicorn >= 0.30", "aiocache >= 0.12"]
 # Needed only to terminate mTLS in-process: `PeerCertH11Protocol` and its httptools sibling
 # subclass uvicorn's HTTP protocols to inject the peer certificate into the ASGI scope, which
 # uvicorn does not do itself. A consumer behind a mesh sidecar, on another server, or not
