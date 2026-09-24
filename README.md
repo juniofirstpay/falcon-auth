@@ -17,7 +17,7 @@ One question — **may this caller do this?** — answered in four parts that pr
 Pipfile:
 
 ```
-falcon-auth = { git = "https://github.com/juniofirstpay/falcon_auth.git", ref = "<sha>" }
+falcon-auth = { git = "https://github.com/juniofirstpay/falcon-auth.git", ref = "<sha>" }
 ```
 
 Pin a `ref`. This package sits on the authorization path of every consuming service; a push reaching production unannounced is the failure mode it exists to design away.

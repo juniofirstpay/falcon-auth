@@ -240,3 +240,18 @@ def test_verifier_codes_property_reads_configured_codes():
     codes = SvcPlaneErrorCodes(missing_cert=5000, unknown_cn=5001, missing_scope=5002)
     v = Verifier(allow={}, codes=codes)
     assert v.codes is codes
+
+
+def test_a_duplicate_cn_in_the_allow_list_is_refused():
+    """Issue #1 A13. Last-row-wins silently changed a peer's scopes -- the shape of a config
+    merge going wrong, where two rows exist for one CN and only the second is enforced. A scope
+    could be granted or lost by row order, with nothing to notice."""
+    import pytest
+
+    from falcon_auth.eastwest.verifier import build_allow_list
+
+    with pytest.raises(ValueError, match="two entries for cn="):
+        build_allow_list([
+            {"cn": "peer.internal", "kind": "SERVICE", "source": "a", "scopes": ["x:read"]},
+            {"cn": "peer.internal", "kind": "SERVICE", "source": "a", "scopes": ["x:write"]},
+        ])

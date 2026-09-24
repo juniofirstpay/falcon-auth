@@ -89,6 +89,14 @@ def build_allow_list(entries: list[Any]) -> AllowList:
                 f"svcplane allow_list entry cn={cn!r}: kind={kind!r} not in "
                 f"{sorted(EAST_WEST_KINDS)}"
             )
+        if cn in allow:
+            # Last-row-wins silently changed a peer's scopes, which is the shape of a config
+            # merge going wrong: two rows for one CN, and only the second one is enforced. A
+            # duplicate is a wiring bug and it fails where the wiring is written.
+            raise ValueError(
+                f"svcplane allow_list has two entries for cn={cn!r}; the second would silently "
+                f"replace the first, so a scope could be granted or lost by row order"
+            )
         allow[cn] = Principal(
             cn=cn,
             kind=kind,

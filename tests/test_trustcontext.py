@@ -268,3 +268,36 @@ async def test_the_api_version_is_required_with_no_default():
             lambda: None,  # type: ignore[arg-type,return-value]
             path_template="/x/{session_ref}",
         )
+
+
+async def test_the_cache_write_survives_either_clients_ttl_keyword():
+    """Issue #1 A10. redis-asyncio spells expiry `ex=`; aiocache spells it `ttl=`. The blanket
+    except swallowed the resulting TypeError, so the write was silently lost and the cache
+    quietly stopped being a cache -- nothing failed, because a cache that always misses still
+    authorizes correctly."""
+    from falcon_auth.trustcontext import RedisCache
+
+    class _AiocacheStyle:
+        def __init__(self):
+            self.stored = {}
+
+        async def set(self, key, value, ttl=None):
+            if ttl is None:
+                raise TypeError("unexpected keyword 'ex'")
+            self.stored[key] = (value, ttl)
+
+    client = _AiocacheStyle()
+    await RedisCache(client, prefix="orders").set("k", "v", 60)
+    assert client.stored == {"orders:k": ("v", 60)}, "the aiocache client received the write"
+
+
+async def test_a_real_transport_failure_is_still_swallowed_to_a_miss():
+    """The read-path contract is unchanged: if redis is down the service gets slower and keeps
+    authorizing, it does not start refusing people."""
+    from falcon_auth.trustcontext import RedisCache
+
+    class _Down:
+        async def set(self, *a, **kw):
+            raise ConnectionError("redis down")
+
+    await RedisCache(_Down(), prefix="orders").set("k", "v", 60)  # no raise

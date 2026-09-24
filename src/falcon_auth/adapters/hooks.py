@@ -14,9 +14,12 @@ Typical wiring::
     verifier = Verifier(build_allow_list(settings.svcplane.allow_list))
     register_error_handlers(http_app)
 
-    # per route
+    # per route. NOTE the import binds at DECORATION time, i.e. at module import -- so the
+    # verifier must already be constructed when the route module is imported. A module-level
+    # singleton built at boot satisfies that; a lazily-initialised one does not, and fails with
+    # whatever the placeholder was rather than with a clear error.
     from falcon_auth.adapters.hooks import require_service_scope
-    from app.services import verifier   # the singleton constructed at boot
+    from app.services import verifier   # constructed at boot, BEFORE routes import
 
     class InternalRevocationsRoute:
         @falcon.before(require_service_scope(verifier, "revocations.sessions:read"))

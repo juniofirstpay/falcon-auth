@@ -434,3 +434,24 @@ def test_adapter_denies_rather_than_raising_on_store_failure():
     auth = _authenticator(store, scheme="DPoP")
     req = _Req({"Authorization": f"DPoP {_token(key, 'k1')}"})
     assert asyncio.run(auth(_User, req, None)) is False
+
+
+def test_issuer_and_audience_are_required_with_no_default():
+    """Issue #1 A12. Both were optional, and `verify` skips the check when either is falsy -- so
+    a consumer that forgot one accepted tokens minted by any issuer, or for any other service,
+    on a valid signature from a key it trusts.
+
+    DEFAULT_DECODE_OPTIONS turns verify_iss and verify_aud ON, which made the omission look safe
+    while the skip-if-falsy guard quietly disabled them. Now it is a TypeError at construction.
+    """
+    import pytest
+
+    from falcon_auth.identity.jwks import JWKSStore, JWKSVerifier
+
+    store = JWKSStore(lambda: None)  # type: ignore[arg-type,return-value]
+
+    with pytest.raises(TypeError):
+        JWKSVerifier(store, audience="orders", forwarded_claims=frozenset())  # type: ignore[call-arg]
+
+    with pytest.raises(TypeError):
+        JWKSVerifier(store, issuer="auth", forwarded_claims=frozenset())  # type: ignore[call-arg]

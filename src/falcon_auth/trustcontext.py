@@ -317,8 +317,28 @@ class RedisCache:
             return None
 
     async def set(self, key: str, value: str, ttl: int) -> None:
+        """Write with a TTL, tolerating either client's expiry keyword.
+
+        redis-asyncio spells it ``ex=``; aiocache spells it ``ttl=``. The class swallows every
+        failure to a miss, which is right for a READ -- a cache is an optimisation and a service
+        should get slower, not start refusing people -- but on a WRITE it meant the wrong keyword
+        raised `TypeError`, was swallowed, and the entry silently never existed. A cache that
+        always misses still authorizes correctly, so nothing fails; it just quietly stops being
+        a cache.
+
+        So the fallback is explicit rather than incidental: try the redis-py spelling, and on a
+        `TypeError` -- which is the signature mismatch, not a transport failure -- try the
+        aiocache one before giving up.
+        """
         try:
             await self._client.set(self._key(key), value, ex=ttl)
+            return None
+        except TypeError:
+            pass  # not this client's keyword; fall through rather than swallow
+        except Exception:  # noqa: BLE001 -- see the class docstring
+            return None
+        try:
+            await self._client.set(self._key(key), value, ttl=ttl)
         except Exception:  # noqa: BLE001
             return None
 

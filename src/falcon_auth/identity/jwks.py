@@ -290,13 +290,26 @@ class JWKSVerifier:
         self,
         store: JWKSStore,
         *,
+        issuer: str,
+        audience: str,
         options: Optional[JWTDecodeOptions] = None,
         algorithms: Optional[list[str]] = None,
-        issuer: Optional[str] = None,
-        audience: Optional[str] = None,
         leeway: float = 0.0,
         forwarded_claims: frozenset[str],
     ):
+        """
+        :param issuer: the ``iss`` every token must carry. **Required, with no default.**
+        :param audience: the ``aud`` every token must carry. **Required, with no default.**
+
+            Both were optional, and `verify` skips the check when either is falsy -- so a
+            consumer that forgot one accepted tokens minted by any issuer, or for any other
+            service, with a valid signature from a key it trusts. `DEFAULT_DECODE_OPTIONS` turns
+            `verify_iss` and `verify_aud` ON, which made the omission look safe while the
+            skip-if-falsy guard quietly disabled them.
+
+            Requiring them makes the omission a `TypeError` at construction rather than a
+            verifier that is weaker than it reads.
+        """
         self._store = store
         self._options: JWTDecodeOptions = options or DEFAULT_DECODE_OPTIONS
         self._algorithms = algorithms or ["RS256"]
