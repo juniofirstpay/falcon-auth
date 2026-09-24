@@ -77,7 +77,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 256 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 288 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|

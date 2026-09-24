@@ -27,11 +27,14 @@ proofs) first, not a verification bolted on here.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
 import falcon.asgi
 import structlog
 
+from ..errors import AuthzUnavailable, Unauthenticated
+from ..eastwest.verifier import Verifier, peer_cn
 from ..identity.jwks import InvalidToken, JWKSVerifier
 
 logger = structlog.get_logger("falcon_auth.adapters")
@@ -121,4 +124,112 @@ class RemoteJWKSAuthenticator:
         return True
 
 
-__all__ = ("RemoteJWKSAuthenticator",)
+
+
+# ── tri-state adapters for the plane middleware ──────────────────────────────
+#
+# The two authenticators above and below answer to DIFFERENT contracts, and mixing them up is
+# the failure issue #1 A4 records:
+#
+#   Authentication.add_authenticator   (user_cls, req, resp) -> bool, sets req.context.user
+#   PlaneAuthenticationMiddleware      (req) -> principal | None, RAISES on an invalid credential
+#
+# `RemoteJWKSAuthenticator` satisfies the first and returns `False` for every failure, including
+# a forged token. Wired into the middleware it reports "no credential present" for a token that
+# was present and invalid -- so C-038 step 2 (401) is skipped, the step-3 search finds a valid
+# credential for another plane, and a FORGED TOKEN gets a 404 instead of a 401.
+#
+# `Verifier.authenticate` has the opposite mismatch: it RAISES when no certificate was presented,
+# which the middleware reads as "present but invalid" rather than "absent".
+#
+# These two adapters exist so neither has to be bent. Each maps its verifier onto the tri-state
+# contract exactly, and each has a middleware test.
+
+
+def jwt_authenticator(
+    verifier: JWKSVerifier,
+    user_cls: type[Any],
+    *,
+    header_name: str = "Authorization",
+    scheme: str | None = "Bearer",
+    user_type: str = "user",
+) -> Callable[[falcon.asgi.Request], Awaitable[Any | None]]:
+    """A tri-state JWT authenticator for :class:`PlaneAuthenticationMiddleware`.
+
+        no header, or a header in another scheme  ->  None   no credential OF THIS KIND
+        header present, token invalid             ->  raises Unauthenticated
+        header present, token valid               ->  the user object
+
+    A header in a different scheme reads as ABSENT, not invalid: ``Authorization: Basic ...`` on
+    a JWT route is a caller who brought a credential this method cannot even parse, which is not
+    evidence that their token was forged.
+
+    A store or fetcher fault raises `AuthzUnavailable`, never `Unauthenticated`. The distinction
+    matters on the wire: one says "your credential is bad", the other says "we could not check".
+    The boolean adapter collapses both to a denial, which during a JWKS outage reads as every
+    user's token going bad at once.
+    """
+
+    async def attempt(req: falcon.asgi.Request) -> Any | None:
+        header_value = req.get_header(header_name)
+        if not header_value:
+            return None
+
+        token = _token_from(header_value, scheme)
+        if not token:
+            # Present, but not in our scheme -- a credential for some other method.
+            return None
+
+        try:
+            claims = await verifier.verify(token)
+        except InvalidToken as e:
+            await logger.awarning("jwt rejected", reason=e.reason)
+            raise Unauthenticated(f"invalid token: {e.reason}") from e
+        except Exception as e:
+            await logger.aerror("jwt validation error", error=str(e))
+            raise AuthzUnavailable("token verification is unavailable") from e
+
+        forwarded = verifier.principal_claims(claims)
+        return user_cls(id=claims.get("sub"), type=user_type, **forwarded)
+
+    return attempt
+
+
+def mtls_authenticator(
+    verifier: Verifier,
+) -> Callable[[falcon.asgi.Request], Awaitable[Any | None]]:
+    """A tri-state mTLS authenticator for :class:`PlaneAuthenticationMiddleware`.
+
+        no client certificate      ->  None   nothing was presented
+        CN not in the allow-list   ->  raises UnknownCNError
+        CN in the allow-list       ->  the east-west Principal
+
+    :meth:`Verifier.authenticate` cannot be used directly here: it raises
+    `MissingClientCertError` when no certificate was presented, and the middleware reads a raise
+    as "present but invalid". A user-plane request -- which legitimately carries no client
+    certificate of its own -- would then look like a broken service-plane credential.
+
+    An unknown CN DOES raise, and that is deliberate. It is a real certificate this service does
+    not recognise, so it is a present-and-invalid credential; on the wrong-plane search a raise
+    ends the lookup at a 401 rather than confirming the endpoint exists with a 404. C-038 step 4
+    needs a VALID credential for another plane, and an unknown CN is not one.
+    """
+
+    async def attempt(req: falcon.asgi.Request) -> Any | None:
+        if peer_cn(req.scope) is None:
+            return None
+        return verifier.authenticate(req.scope)
+
+    return attempt
+
+
+def _token_from(header_value: str, scheme: str | None) -> str | None:
+    if scheme is None:
+        return header_value
+    parts = header_value.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != scheme.lower():
+        return None
+    return parts[1].strip()
+
+
+__all__ = ("RemoteJWKSAuthenticator", "jwt_authenticator", "mtls_authenticator")

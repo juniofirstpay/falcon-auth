@@ -29,7 +29,9 @@ Modules:
                         require_service_scope · require_callback (east-west)
                         principal_from_request
     errors.py           register_error_handlers · render_svcplane_error
-    authenticators.py   RemoteJWKSAuthenticator
+    authenticators.py   RemoteJWKSAuthenticator (boolean, for Authentication) ·
+                        jwt_authenticator / mtls_authenticator (tri-state, for the
+                        plane middleware) -- two contracts, see the module
     hooks.py            ... plus verify_operation_for -- per-operation step-up, called
                         INLINE from a responder rather than as a hook, because the
                         idempotency reservation it must follow is itself inline
@@ -42,7 +44,11 @@ Modules:
 
 from __future__ import annotations
 
-from .authenticators import RemoteJWKSAuthenticator
+from .authenticators import (
+    RemoteJWKSAuthenticator,
+    jwt_authenticator,
+    mtls_authenticator,
+)
 from .errors import register_error_handlers, render_svcplane_error
 from .middleware import (
     AUTH_METHOD_ATTR,
@@ -93,6 +99,8 @@ __all__ = (
     "register_error_handlers",
     "Registration",
     "RemoteJWKSAuthenticator",
+    "jwt_authenticator",
+    "mtls_authenticator",
     "render_svcplane_error",
     "require",
     "require_callback",
