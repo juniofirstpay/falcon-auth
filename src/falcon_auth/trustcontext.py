@@ -181,6 +181,7 @@ class HttpTrustContextClient:
         session_getter: Callable[[], aiohttp.ClientSession],
         *,
         path_template: str,
+        api_version: str | None,
     ) -> None:
         """
         :param session_getter: returns the host's already-configured mTLS session.
@@ -189,15 +190,27 @@ class HttpTrustContextClient:
             mounted, and under which API version -- and a default here would be a guess
             baked into a library, wrong for the first consumer that mounts it elsewhere.
             C-039 puts the version in the first path segment, so this is where it goes.
+        :param api_version: value for the ``X-API-Version`` header, or ``None`` to send none.
+            **Required, with no default.**
+
+            C-039 drops this header -- the version is the first path segment -- but auth has not
+            adopted C-039 and gates every endpoint on it (`validate_api_version`, 400/E1004 when
+            missing or unknown). So the correct value depends on which auth you are talking to,
+            and both plausible defaults are wrong somewhere: defaulting to ``"1"`` keeps sending
+            a header the convention retired, and defaulting to ``None`` 400s against auth as
+            deployed today. Neither failure is loud, so the host states it.
         """
         self._session_getter = session_getter
         self._path_template = path_template
+        self._headers = {"X-API-Version": api_version} if api_version is not None else {}
 
     async def fetch(self, session_ref: str, *, user_ref: str) -> TrustContext:
         path = self._path_template.format(session_ref=session_ref)
         try:
             session = self._session_getter()
-            async with session.get(path, params={"user_ref": user_ref}) as response:
+            async with session.get(
+                path, params={"user_ref": user_ref}, headers=self._headers
+            ) as response:
                 if response.status == 200:
                     return TrustContext.model_validate(await response.json())
                 await self._raise_for(response)

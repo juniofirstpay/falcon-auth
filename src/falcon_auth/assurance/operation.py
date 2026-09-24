@@ -255,6 +255,7 @@ class HttpOperationVerifier:
         session_getter: Callable[[], aiohttp.ClientSession],
         *,
         path_template: str,
+        api_version: str | None,
     ) -> None:
         """
         :param path_template: auth's operation-verify path, with `{session_ref}` and
@@ -262,9 +263,19 @@ class HttpOperationVerifier:
             trust-context path is: where auth is mounted and under which API version is a
             deployment fact, and a library that guesses it is wrong for the first consumer who
             mounts it elsewhere.
+        :param api_version: value for the ``X-API-Version`` header, or ``None`` to send none.
+            **Required, with no default.**
+
+            C-039 drops this header -- the version is the first path segment -- but auth has not
+            adopted C-039 and gates every endpoint on it (`validate_api_version`, 400/E1004 when
+            missing or unknown). So the correct value depends on which auth you are talking to,
+            and both plausible defaults are wrong somewhere: defaulting to ``"1"`` keeps sending
+            a header the convention retired, and defaulting to ``None`` 400s against auth as
+            deployed today. Neither failure is loud, so the host states it.
         """
         self._session_getter = session_getter
         self._path_template = path_template
+        self._headers = {"X-API-Version": api_version} if api_version is not None else {}
 
     async def verify(
         self, session_ref: str, operation_id: str, *, user_ref: str
@@ -274,7 +285,9 @@ class HttpOperationVerifier:
         )
         try:
             session = self._session_getter()
-            async with session.post(path, json={"user_ref": user_ref}) as response:
+            async with session.post(
+                path, json={"user_ref": user_ref}, headers=self._headers
+            ) as response:
                 if response.status == 200:
                     return OperationVerification.model_validate(await response.json())
                 await self._raise_for(response, operation_id)

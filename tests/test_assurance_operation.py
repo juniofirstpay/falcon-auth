@@ -267,3 +267,77 @@ def test_there_is_no_before_hook_for_this():
     from falcon_auth.adapters import hooks
 
     assert not hasattr(hooks, "require_operation_step_up")
+
+# ── the HTTP client and the version header auth requires ─────────────────────
+
+
+async def test_the_verifier_sends_the_api_version_and_posts_the_user_ref():
+    """Auth gates every endpoint on X-API-Version (validate_api_version, 400/E1004 when missing).
+    C-039 retires the header; auth has not adopted it. Required argument, no default."""
+    from falcon_auth.assurance.operation import HttpOperationVerifier
+
+    seen: dict = {}
+
+    class _Resp:
+        status = 200
+
+        async def json(self):
+            return {
+                "session_ref": "sess-1", "user_ref": "user-1", "operation_id": "op-1",
+                "purpose": "profile.update", "target_session_tier": 2,
+                "request_body_hash": None, "consumed_at": "2026-08-07T10:22:45Z",
+            }
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def post(self, path, **kw):
+            seen.update(kw)
+            seen["path"] = path
+            return _Resp()
+
+    verifier = HttpOperationVerifier(
+        lambda: _Session(),  # type: ignore[arg-type,return-value]
+        path_template="/internal/sessions/{session_ref}/operations/{operation_id}:verify",
+        api_version="1",
+    )
+    out = await verifier.verify("sess-1", "op-1", user_ref="user-1")
+
+    assert seen["path"] == "/internal/sessions/sess-1/operations/op-1:verify"
+    assert seen["headers"] == {"X-API-Version": "1"}
+    assert seen["json"] == {"user_ref": "user-1"}, "user_ref rides in the BODY, not the query"
+    assert out.consumed_at == "2026-08-07T10:22:45Z"
+
+
+async def test_a_410_is_the_uniform_miss():
+    """Auth answers 8501 for not-found / not-owned / not-PASSED / expired / already-consumed
+    alike, so challenge state does not leak across the plane."""
+    from falcon_auth.assurance.operation import HttpOperationVerifier
+
+    class _Resp:
+        status = 410
+
+        async def json(self):
+            return {"code": 8501}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def post(self, path, **kw):
+            return _Resp()
+
+    verifier = HttpOperationVerifier(
+        lambda: _Session(),  # type: ignore[arg-type,return-value]
+        path_template="/internal/sessions/{session_ref}/operations/{operation_id}:verify",
+        api_version="1",
+    )
+    with pytest.raises(OperationChallengeMiss):
+        await verifier.verify("sess-1", "op-1", user_ref="user-1")

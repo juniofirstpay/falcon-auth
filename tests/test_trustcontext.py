@@ -187,8 +187,15 @@ def test_the_cache_key_prefix_is_required():
         RedisCache(object())  # type: ignore[call-arg]
 
 
-async def test_the_client_sends_no_api_version_header():
-    """C-039 drops `X-API-Version` altogether -- the version is the first path segment."""
+async def test_the_client_sends_the_api_version_auth_requires():
+    """C-039 drops `X-API-Version` -- the version is the first path segment -- but AUTH HAS NOT
+    ADOPTED IT. `validate_api_version` gates every endpoint across 15 route modules and answers
+    400/E1004 when the header is missing or unknown.
+
+    An earlier version of this test asserted the client sends NO version header, citing C-039.
+    That was convention-correct and reality-wrong: the package could not talk to auth at all,
+    because every read would 400 and surface as AuthzUnavailable.
+    """
     from falcon_auth.trustcontext import HttpTrustContextClient
 
     seen: dict = {}
@@ -206,18 +213,58 @@ async def test_the_client_sends_no_api_version_header():
             return False
 
     class _Session:
-        def get(self, path, **kwargs):
+        def get(self, path, **kw):
+            seen.update(kw)
             seen["path"] = path
-            seen["kwargs"] = kwargs
+            return _Resp()
+
+    client = HttpTrustContextClient(
+        lambda: _Session(),  # type: ignore[arg-type,return-value]
+        path_template="/internal/sessions/{session_ref}/trust-context",
+        api_version="1",
+    )
+    await client.fetch("sess-1", user_ref="user-1")
+    assert seen["headers"] == {"X-API-Version": "1"}
+
+
+async def test_none_means_send_no_version_header():
+    """A legitimate value, for an auth that has adopted C-039. It is REQUIRED rather than
+    defaulted because both plausible defaults are wrong somewhere and neither fails loudly."""
+    from falcon_auth.trustcontext import HttpTrustContextClient
+
+    seen: dict = {}
+
+    class _Resp:
+        status = 200
+
+        async def json(self):
+            return {**BASE, "grants": ["RETAIL_USER"]}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def get(self, path, **kw):
+            seen.update(kw)
             return _Resp()
 
     client = HttpTrustContextClient(
         lambda: _Session(),  # type: ignore[arg-type,return-value]
         path_template="/v1/internal/sessions/{session_ref}/trust-context",
+        api_version=None,
     )
-    ctx = await client.fetch("sess-1", user_ref="user-1")
+    await client.fetch("sess-1", user_ref="user-1")
+    assert seen["headers"] == {}
 
-    assert ctx.grants == ["RETAIL_USER"]
-    assert seen["path"] == "/v1/internal/sessions/sess-1/trust-context"
-    assert "headers" not in seen["kwargs"], "no X-API-Version header (C-039)"
-    assert seen["kwargs"]["params"] == {"user_ref": "user-1"}
+
+async def test_the_api_version_is_required_with_no_default():
+    from falcon_auth.trustcontext import HttpTrustContextClient
+
+    with pytest.raises(TypeError):
+        HttpTrustContextClient(  # type: ignore[call-arg]
+            lambda: None,  # type: ignore[arg-type,return-value]
+            path_template="/x/{session_ref}",
+        )
