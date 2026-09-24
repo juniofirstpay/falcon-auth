@@ -14,10 +14,11 @@ Typical wiring::
     verifier = Verifier(build_allow_list(settings.svcplane.allow_list))
     register_error_handlers(http_app)
 
-    # per route. NOTE the import binds at DECORATION time, i.e. at module import -- so the
-    # verifier must already be constructed when the route module is imported. A module-level
-    # singleton built at boot satisfies that; a lazily-initialised one does not, and fails with
-    # whatever the placeholder was rather than with a clear error.
+    # per route. Binding happens at DECORATION time -- when this module is imported -- so the
+    # verifier must already be constructed. A module-level singleton built at boot satisfies
+    # that; a container that populates later, or a `configure()` that runs after routes import,
+    # does not. Each factory CHECKS this and raises here rather than leaving a hook holding a
+    # placeholder that 500s at request time.
     from falcon_auth.adapters.hooks import require_service_scope
     from app.services import verifier   # constructed at boot, BEFORE routes import
 
@@ -60,6 +61,33 @@ HookFn = Callable[
 ]
 
 
+
+def _bind(collaborator: Any, method: str, *, param: str, factory: str) -> Any:
+    """Check a hook's collaborator is usable NOW, because the hook binds it now.
+
+    ``@falcon.before(require_service_scope(verifier, "x:read"))`` calls the factory while the
+    class body executes -- at module import. Whatever ``verifier`` is at that moment is what the
+    closure keeps forever. A DI container that has not populated yet, a ``configure()`` that
+    runs after routes import, a test that patches the module attribute afterwards: each leaves
+    the hook holding the placeholder, and nothing says so.
+
+    The failure without this check is the shape the package closes everywhere else -- a 500 on a
+    gated route, at request time, from an ``AttributeError`` on ``None``. Here it is a clear
+    error at import, naming the argument and what it needs to be.
+
+    Duck-typed rather than isinstance: a consumer may legitimately pass a wrapper, a test double
+    or a lazy proxy. What matters is that the method the hook will call exists NOW.
+    """
+    if collaborator is None or not callable(getattr(collaborator, method, None)):
+        raise TypeError(
+            f"{factory}({param}=...) needs an object with a callable .{method}(); got "
+            f"{collaborator!r}. Hooks bind at DECORATION time -- when the route module is "
+            f"imported -- so this must already be constructed. If a container builds it, build "
+            f"it before the route modules import rather than passing a placeholder"
+        )
+    return collaborator
+
+
 def require_service_scope(verifier: Verifier, scope: str) -> HookFn:
     """Return a Falcon ``before`` hook that gates a SERVICE route on ``scope``.
 
@@ -68,6 +96,8 @@ def require_service_scope(verifier: Verifier, scope: str) -> HookFn:
     → :class:`~falcon_auth.eastwest.errors.UnknownCNError` (403), missing scope →
     :class:`~falcon_auth.eastwest.errors.MissingScopeError` (403).
     """
+
+    _bind(verifier, "authenticate", param="verifier", factory="require_service_scope")
 
     async def hook(
         req: falcon.asgi.Request,
@@ -91,6 +121,8 @@ def require_callback(verifier: Verifier) -> HookFn:
     presented a known cert-bound identity is the whole authorization. Body is
     treated as data, not a command.
     """
+
+    _bind(verifier, "authenticate", param="verifier", factory="require_callback")
 
     async def hook(
         req: falcon.asgi.Request,
@@ -135,6 +167,13 @@ def require_elevated(client: TrustContextClient, refs: RefExtractor) -> HookFn:
     session is gone -- re-authenticate instead), or `AuthzUnavailable` (the lookup failed --
     a challenge cannot fix that).
     """
+
+    _bind(client, "fetch", param="client", factory="require_elevated")
+    if not callable(refs):
+        raise TypeError(
+            f"require_elevated(refs=...) needs a callable (req) -> (session_ref, user_ref); "
+            f"got {refs!r}"
+        )
 
     async def hook(
         req: falcon.asgi.Request,
@@ -272,6 +311,8 @@ def require(
     rather than serve the last-good copy. Nothing sets it until a service classifies its own
     operations.
     """
+    _bind(enforcer, "knows", param="enforcer", factory="require")
+    _bind(resolver, "resolve", param="resolver", factory="require")
     if not enforcer.knows(capability):
         raise ValueError(
             f"capability {capability!r} is not in the capability registry -- add a row for it "

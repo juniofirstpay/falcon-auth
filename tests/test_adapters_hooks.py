@@ -257,3 +257,60 @@ def test_every_hook_factory_produces_a_kwarg_tolerant_hook():
         kinds = {p.kind for p in inspect.signature(hook).parameters.values()}
         assert inspect.Parameter.VAR_KEYWORD in kinds, f"{name} rejects stray kwargs"
         assert inspect.Parameter.VAR_POSITIONAL in kinds, f"{name} rejects stray args"
+
+
+# ── A17: the decoration-time binding constraint is enforced ───────────────────
+
+
+def test_an_unbuilt_collaborator_is_refused_at_decoration_not_at_request_time():
+    """Issue #1 A17. `require_service_scope(verifier, ...)` is CALLED while the class body
+    executes -- at module import -- so whatever `verifier` is at that moment is what the closure
+    keeps forever.
+
+    A container that populates later, a `configure()` that runs after routes import, a test
+    that patches the module attribute afterwards: each leaves the hook holding the placeholder.
+    Before this check the result was a 500 on a gated route at request time, from an
+    AttributeError on None -- the exact failure class this package closes everywhere else.
+    """
+    with pytest.raises(TypeError, match="DECORATION time"):
+        require_service_scope(None, "x:read")  # type: ignore[arg-type]
+
+
+def test_every_hook_factory_checks_what_it_will_call():
+    """Each names the argument and the method it needs, so the error says what to fix."""
+    from falcon_auth.adapters.hooks import require, require_callback, require_elevated
+
+    with pytest.raises(TypeError, match=r"\.authenticate\(\)"):
+        require_callback(None)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match=r"\.fetch\(\)"):
+        require_elevated(None, lambda req: ("s", "u"))  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match=r"\.resolve\(\)"):
+        require(_KnowsEverything(), None, "orders:read")  # type: ignore[arg-type]
+
+
+def test_a_non_callable_ref_extractor_is_refused_too():
+    from falcon_auth.adapters.hooks import require_elevated
+
+    class _Client:
+        async def fetch(self, *a, **kw): ...
+
+    with pytest.raises(TypeError, match="callable"):
+        require_elevated(_Client(), "not a function")  # type: ignore[arg-type]
+
+
+def test_the_check_is_duck_typed_so_a_test_double_still_works():
+    """isinstance would reject a wrapper, a stub or a lazy proxy. What matters is that the
+    method the hook will call exists NOW."""
+
+    class _Stub:
+        def authenticate(self, scope): ...
+        def require_scope(self, principal, scope): ...
+
+    assert require_service_scope(_Stub(), "x:read") is not None
+
+
+class _KnowsEverything:
+    def knows(self, capability):
+        return True
