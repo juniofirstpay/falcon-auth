@@ -14,6 +14,7 @@ import pytest
 from falcon_auth.assurance.operation import (
     OperationBodyMismatch,
     OperationChallengeMiss,
+    OperationPurposeMismatch,
     OperationVerification,
     verify_operation,
 )
@@ -30,6 +31,7 @@ def _verification(**over):
         "purpose": "profile.update",
         "target_session_tier": SESSION_TRUST_ELEVATED,
         "request_body_hash": None,
+        "consumed_at": "2026-08-07T10:22:45Z",
         **over,
     })
 
@@ -54,7 +56,7 @@ class _Verifier:
 
 async def test_a_passed_challenge_for_this_operation_authorizes_it():
     v = _Verifier()
-    out = await verify_operation(v, "sess-1", "op-1", user_ref="user-1")
+    out = await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update")
     assert out.operation_id == "op-1"
     assert v.calls == [("sess-1", "op-1", "user-1")]
 
@@ -64,23 +66,48 @@ async def test_an_unspendable_challenge_is_not_a_retry():
     not leak. The client's recovery is a NEW operation id, not a retry of this one."""
     v = _Verifier(raises=OperationChallengeMiss("gone"))
     with pytest.raises(OperationChallengeMiss):
-        await verify_operation(v, "sess-1", "op-1", user_ref="user-1")
+        await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update")
 
 
-async def test_a_weaker_challenge_cannot_be_spent_on_a_stronger_route():
-    """A real, passed challenge raised under a weaker policy. StepUpRequired rather than a miss:
-    the session is fine and a challenge really is what is needed, just a stronger one."""
+async def test_a_challenge_for_another_purpose_cannot_be_spent_here():
+    """Cross-purpose replay, and the only place it can be caught. A challenge passed for
+    `mpin_reset` must not authorize a wallet transfer just because both are operation-scoped --
+    and auth cannot check it, because the operation id is unique only within a session and auth
+    does not know which route is redeeming it."""
+    v = _Verifier(_verification(purpose="mpin_reset"))
+    with pytest.raises(OperationPurposeMismatch):
+        await verify_operation(
+            v, "sess-1", "op-1", user_ref="user-1", expected_purpose="wallet.transfer"
+        )
+
+
+async def test_the_challenge_is_spent_even_when_the_purpose_is_wrong():
+    """Worth being explicit about. Auth consumed it -- it was valid for ITS purpose -- so the
+    user must re-challenge. That is the cost of catching this downstream."""
+    v = _Verifier(_verification(purpose="mpin_reset"))
+    with pytest.raises(OperationPurposeMismatch):
+        await verify_operation(
+            v, "sess-1", "op-1", user_ref="user-1", expected_purpose="wallet.transfer"
+        )
+    assert v.calls == [("sess-1", "op-1", "user-1")], "auth was called; the challenge is gone"
+
+
+async def test_there_is_no_tier_gate_on_this_path():
+    """AUTH-ADR-112: an operation-scoped step-up does NOT raise the session's ambient tier --
+    `challenge:authenticate` answers 204 and writes no trust state. Gating on
+    target_session_tier would assert session-trust semantics this path does not have, so a
+    challenge whose recorded tier is AUTHENTICATED still verifies."""
     v = _Verifier(_verification(target_session_tier=SESSION_TRUST_AUTHENTICATED))
-    with pytest.raises(StepUpRequired) as excinfo:
-        await verify_operation(v, "sess-1", "op-1", user_ref="user-1")
-    assert excinfo.value.required == SESSION_TRUST_ELEVATED
-    assert excinfo.value.present == SESSION_TRUST_AUTHENTICATED
+    out = await verify_operation(
+        v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update"
+    )
+    assert out.target_session_tier == SESSION_TRUST_AUTHENTICATED
 
 
 async def test_an_infrastructure_failure_is_not_a_user_denial():
     v = _Verifier(raises=AuthzUnavailable("down"))
     with pytest.raises(AuthzUnavailable):
-        await verify_operation(v, "sess-1", "op-1", user_ref="user-1")
+        await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update")
 
 
 # ── body binding ──────────────────────────────────────────────────────────────
@@ -88,7 +115,7 @@ async def test_an_infrastructure_failure_is_not_a_user_denial():
 
 async def test_a_matching_body_passes():
     v = _Verifier(_verification(request_body_hash="abc"))
-    out = await verify_operation(v, "sess-1", "op-1", user_ref="user-1", body_hash="abc")
+    out = await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update", body_hash="abc")
     assert out.request_body_hash == "abc"
 
 
@@ -97,7 +124,7 @@ async def test_a_different_body_is_a_different_act():
     50000. Same operation id, different act."""
     v = _Verifier(_verification(request_body_hash="for-500"))
     with pytest.raises(OperationBodyMismatch):
-        await verify_operation(v, "sess-1", "op-1", user_ref="user-1", body_hash="for-50000")
+        await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update", body_hash="for-50000")
 
 
 async def test_a_bound_challenge_with_no_computed_hash_is_refused():
@@ -106,13 +133,13 @@ async def test_a_bound_challenge_with_no_computed_hash_is_refused():
     how a body-bound challenge stops being body-bound."""
     v = _Verifier(_verification(request_body_hash="abc"))
     with pytest.raises(OperationBodyMismatch, match="no body hash was computed"):
-        await verify_operation(v, "sess-1", "op-1", user_ref="user-1", body_hash=None)
+        await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update", body_hash=None)
 
 
 async def test_an_unbound_challenge_needs_no_comparison():
     """`request_body_hash: null` means the purpose is not body-bound. Nothing to compare."""
     v = _Verifier(_verification(request_body_hash=None))
-    assert await verify_operation(v, "sess-1", "op-1", user_ref="user-1", body_hash="anything")
+    assert await verify_operation(v, "sess-1", "op-1", user_ref="user-1", expected_purpose="profile.update", body_hash="anything")
 
 
 # ── the inline form, and the reservation it must follow ──────────────────────
@@ -148,7 +175,9 @@ def _app(verifier, *, outcome=_Reservation.RESERVED, body_hash=None, stored=None
                 resp.status = falcon.HTTP_202
                 return
 
-            await verify_operation_for(req, verifier, refs, body_hash=body_hash)
+            await verify_operation_for(
+                req, verifier, refs, expected_purpose="profile.update", body_hash=body_hash
+            )
             resp.media = {"body": await req.get_media()}
 
     app = falcon.asgi.App()

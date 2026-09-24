@@ -35,7 +35,6 @@ import falcon
 import falcon.asgi
 
 from ..assurance.operation import BodyHasher, OperationVerifier, verify_operation
-from ..trustcontext import SESSION_TRUST_ELEVATED
 from ..assurance.stepup import check_session_elevated
 from ..entitlement.enforcer import CapabilityEnforcer
 from ..entitlement.resolver import Resolver
@@ -165,8 +164,8 @@ async def verify_operation_for(
     verifier: OperationVerifier,
     refs: RefExtractor,
     *,
+    expected_purpose: str,
     body_hash: BodyHasher | None = None,
-    required_tier: int = SESSION_TRUST_ELEVATED,
     operation_header: str = DEFAULT_OPERATION_HEADER,
 ) -> Any:
     """Consume this request's step-up challenge. **Call it from inside the handler.**
@@ -194,19 +193,23 @@ async def verify_operation_for(
             return
 
         # RESERVED: a genuine first execution, and the only branch that may spend a challenge.
-        await verify_operation_for(req, verifier, refs, body_hash=quote_digest)
+        await verify_operation_for(
+            req, verifier, refs, expected_purpose="order_create", body_hash=quote_digest
+        )
         ...perform the write...
 
     Reuse the fingerprint the idempotency reservation already computes rather than writing a
     second canonicalizer: two definitions of "canonical" over one body will drift, and the day
     they do, a body-bound challenge silently stops matching.
 
+    :param expected_purpose: the purpose this route accepts, passed straight through. Required,
+        with no default -- see :func:`~falcon_auth.assurance.operation.verify_operation`.
     :param body_hash: this service's canonicalizer, taking the parsed media and returning the
         hash to compare with the one the challenge was bound to.
 
     Raises `Unauthenticated` (no operation id), `OperationChallengeMiss` (run step-up again
-    under a new id), `OperationBodyMismatch` (not the act that was authorized), `StepUpRequired`
-    (a weaker challenge than this route needs) or `AuthzUnavailable`.
+    under a new id), `OperationPurposeMismatch` (a challenge for a different act),
+    `OperationBodyMismatch` (not the body that was authorized) or `AuthzUnavailable`.
     """
     operation_id = req.get_header(operation_header)
     if not operation_id:
@@ -228,8 +231,8 @@ async def verify_operation_for(
         session_ref,
         operation_id,
         user_ref=user_ref,
+        expected_purpose=expected_purpose,
         body_hash=computed,
-        required_tier=required_tier,
     )
 
 

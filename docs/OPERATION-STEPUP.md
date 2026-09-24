@@ -42,7 +42,10 @@ class ProfileResource:
             return
 
         # RESERVED: the only branch that may spend a challenge
-        await verify_operation_for(req, verifier, refs, body_hash=quote_digest)
+        await verify_operation_for(
+            req, verifier, refs,
+            expected_purpose="order_create", body_hash=quote_digest,
+        )
         ...perform the write...
 ```
 
@@ -83,14 +86,14 @@ client mints X-Operation-ID, runs step-up under it     challenge -> PASSED
             │     410 / 8501  ──►  OperationChallengeMiss
             │     403         ──►  AuthzUnavailable   our cert lacks step_up:verify
             │
-            ├─ target_session_tier < required  ──►  StepUpRequired
+            ├─ purpose != expected_purpose     ──►  OperationPurposeMismatch
             ├─ request_body_hash != ours       ──►  OperationBodyMismatch
             └─ ──►  OperationVerification, then perform the write
 ```
 
 ---
 
-## Three things that are not obvious
+## Four things that are not obvious
 
 ### 1. There is no `before` hook, and that is the design
 
@@ -139,7 +142,30 @@ handler media: 400 "Could not parse an empty JSON body"
 share one object — whichever calls it first. There is a test asserting the handler still sees
 its body afterwards.
 
-### 3. Consume-before-execute burns a challenge on a failed write
+### 3. Purpose is the gate, not a tier
+
+An operation-scoped step-up does **not** raise the session's ambient trust tier.
+`challenge:authenticate` answers **204** and writes no trust state (AUTH-ADR-112) — a proof
+scoped to one operation must not grant a blanket window over the whole session, which is what
+it was silently doing before that correction.
+
+So there is no `required_tier` here. `target_session_tier` still rides on the response, but as
+**provenance** — what policy the challenge was raised under — not as a statement about the
+session. The session tier is [ASSURANCE.md](ASSURANCE.md)'s question, on the read path.
+
+What gates this path is **`expected_purpose`**, and it is required with no default. Every
+challenge is raised under a purpose (`ChallengePolicy` is keyed by it), and one passed for
+`mpin_reset` must not be spendable on a wallet transfer. Auth cannot make that check — the
+operation id is unique only *within a session*, and auth does not know which route is
+redeeming it.
+
+Note the consequence: by the time a purpose mismatch is caught, auth has already **consumed**
+the challenge, because it was perfectly valid for its own purpose. The user must re-challenge.
+That is the cost of catching cross-purpose replay at the only place it can be caught — and the
+reason a default on `expected_purpose` would be dangerous: cross-purpose replay would become
+the behaviour you get by forgetting.
+
+### 4. Consume-before-execute burns a challenge on a failed write
 
 `:verify` **spends** the authorization before the handler runs. If the write then fails, the
 challenge is gone and the user must step up again rather than retry.
@@ -195,7 +221,7 @@ challenge quietly stops being body-bound.
 | `Unauthenticated` | no `X-Operation-ID` on a route that needs one | mint one, run step-up |
 | `OperationChallengeMiss` | unknown, unpassed, expired **or already consumed** | run step-up under a **new** operation id |
 | `OperationBodyMismatch` | not the act that was authorized | re-raise the challenge for this body |
-| `StepUpRequired` | real challenge, weaker tier than this route needs | raise a stronger challenge |
+| `OperationPurposeMismatch` | a real challenge, raised for a **different act** | re-challenge under the right purpose |
 
 `OperationChallengeMiss` is deliberately uniform. Auth answers unknown, unpassed, expired and
 consumed with one code so challenge state does not leak across the mTLS boundary — a consumed

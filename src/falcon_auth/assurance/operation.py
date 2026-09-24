@@ -53,8 +53,7 @@ import aiohttp
 from pydantic import BaseModel, ConfigDict, ValidationError
 from structlog import get_logger
 
-from ..errors import AuthzError, AuthzUnavailable, StepUpRequired
-from ..trustcontext import SESSION_TRUST_ELEVATED
+from ..errors import AuthzError, AuthzUnavailable
 
 logger = get_logger(__name__)
 
@@ -64,6 +63,7 @@ __all__ = (
     "HttpOperationVerifier",
     "OperationBodyMismatch",
     "OperationChallengeMiss",
+    "OperationPurposeMismatch",
     "OperationVerification",
     "OperationVerifier",
     "verify_operation",
@@ -80,6 +80,18 @@ class OperationChallengeMiss(AuthzError):
     **Not a retry.** The client's recovery is to run step-up again under a NEW operation id.
     Distinguishable from an ordinary failure on purpose: a client that treats it as transient
     retries forever into a challenge that will never become spendable again.
+    """
+
+
+class OperationPurposeMismatch(AuthzError):
+    """A real challenge, passed and unspent -- raised for a different purpose.
+
+    Note what has already happened by the time this raises: auth **consumed** the challenge,
+    because it was perfectly valid for the purpose it was raised under. Auth cannot make this
+    check -- the operation id is unique only within a session and auth does not know which route
+    is redeeming it. So the challenge is spent either way, and the user must re-challenge under
+    the right purpose. That is the cost of catching cross-purpose replay at the only place it
+    can be caught.
     """
 
 
@@ -100,14 +112,19 @@ class OperationVerification(BaseModel):
     session_ref: str
     user_ref: str
     operation_id: str
-    #: The policy the step-up was raised under, e.g. ``wallet.transfer``.
+    #: The policy this challenge was raised under, e.g. ``mpin_reset``. THE discriminator:
+    #: `ChallengePolicy` is keyed by purpose, and a challenge passed for one purpose must not
+    #: authorize another. See :func:`verify_operation`'s ``expected_purpose``.
     purpose: str
-    #: The tier this challenge authorized -- NOT the tier the session happens to be at.
+    #: The tier recorded on the challenge row. Read it as provenance, NOT as session trust: an
+    #: operation-scoped step-up does not move the session's ambient tier (AUTH-ADR-112), so
+    #: this says what policy the challenge was raised under, not what the session now is.
     target_session_tier: int
-    #: base64url of the body hash the challenge was bound to, or ``None`` when the purpose is
-    #: not body-bound. The CALLER compares it; auth does not.
+    #: base64url of the body hash the challenge was bound to, or ``None`` when the purpose's
+    #: policy declares it not body-bound (`ChallengePolicy.body_hash_required`). The CALLER
+    #: compares it; auth stores and returns it but does not compare.
     request_body_hash: str | None = None
-    passed_at: str | None = None
+    #: ISO-8601 UTC -- when this call spent the challenge.
     consumed_at: str | None = None
 
 
@@ -125,36 +142,50 @@ async def verify_operation(
     operation_id: str,
     *,
     user_ref: str,
+    expected_purpose: str,
     body_hash: str | None = None,
-    required_tier: int = SESSION_TRUST_ELEVATED,
 ) -> OperationVerification:
-    """Consume the challenge for ``operation_id`` and check it authorizes this act.
+    """Consume the challenge for ``operation_id`` and check it authorizes THIS act.
 
     **This spends the authorization.** Call it before the mutation; execute only on success.
 
+    :param expected_purpose: the purpose this route accepts. **Required, with no default.**
+
+        Purpose is the discriminator, not a tier. A challenge is raised under a policy
+        (`ChallengePolicy`, keyed by purpose) and passed against that policy; a challenge the
+        user passed for ``mpin_reset`` must not be spendable on a wallet transfer just because
+        both are operation-scoped. Auth cannot make that check -- the operation id is unique
+        within a session, and auth does not know which route is redeeming it -- so it is the
+        consuming service's, and it is the reason this parameter has no default. Defaulting it
+        would make cross-purpose replay the behaviour you get by forgetting.
+
     :param body_hash: this service's canonical hash of the request body, or ``None`` if it has
-        not computed one. See below -- ``None`` is not "skip the check".
-    :param required_tier: the tier this route demands. Defaults to ELEVATED, because a route
-        reaching for per-operation step-up at all is asking for more than a session tier.
+        not computed one. ``None`` is not "skip the check" -- see :func:`_check_body`.
 
     :raises OperationChallengeMiss: unknown, unpassed, expired or already consumed.
-    :raises StepUpRequired: the challenge was real but authorized a LOWER tier than this route
-        needs -- a challenge raised for one policy cannot be spent on a stronger one.
+    :raises OperationPurposeMismatch: a real challenge, raised for a different purpose.
     :raises OperationBodyMismatch: the body is not the one the challenge was bound to.
     :raises AuthzUnavailable: the lookup itself failed, or our certificate lacks
         ``step_up:verify``. An infrastructure fault, never a user denial.
+
+    .. note::
+       There is deliberately no ``required_tier`` here. An operation-scoped step-up does **not**
+       raise the session's ambient trust tier (AUTH-ADR-112): ``challenge:authenticate`` returns
+       **204** and writes no trust state, because a proof scoped to one operation must not grant
+       a blanket window over the whole session. ``target_session_tier`` still rides on the
+       response as provenance, but gating on it would assert session-trust semantics this path
+       does not have. The session tier is :mod:`falcon_auth.assurance.stepup`'s question.
     """
     verification = await verifier.verify(session_ref, operation_id, user_ref=user_ref)
 
-    if verification.target_session_tier < required_tier:
-        # A real, passed challenge -- for a weaker policy than this route requires. Refusing as
-        # StepUpRequired rather than a miss is the honest answer: the session is fine and a
-        # challenge is genuinely what is needed, just a stronger one.
-        raise StepUpRequired(
-            "this operation requires a stronger step-up than the one that was passed",
-            required=required_tier,
-            present=verification.target_session_tier,
+    if verification.purpose != expected_purpose:
+        # A real, passed, unspent challenge -- for a different act. Refusing it here is the only
+        # place this can be caught: auth consumed it because it was valid FOR ITS OWN purpose.
+        raise OperationPurposeMismatch(
+            "this step-up was raised for a different purpose",
             operation_id=operation_id,
+            expected=expected_purpose,
+            present=verification.purpose,
         )
 
     _check_body(verification, body_hash, operation_id)
