@@ -32,55 +32,69 @@ class ProfileResource:
     @falcon.before(require_elevated_for_this_service)
     async def on_get(self, req, resp): ...
 
-    @falcon.before(idempotency_lookup)
-    @falcon.before(require_profile_mutation_stepup)
-    async def on_patch(self, req, resp): ...
+    async def on_patch(self, req, resp):
+        reservation, stored = await idempotency.reserve(key=key, fingerprint=fingerprint)
+        if reservation is Reservation.REPLAY:
+            resp.media = stored                  # never verify -- already spent
+            return
+        if reservation is Reservation.IN_PROGRESS:
+            resp.status = falcon.HTTP_202        # never verify -- still running
+            return
+
+        # RESERVED: the only branch that may spend a challenge
+        await verify_operation_for(req, verifier, refs, body_hash=quote_digest)
+        ...perform the write...
 ```
+
+Note the asymmetry: the read is gated by a **decorator**, the write is **not**. That is not an
+inconsistency — see below.
 
 ---
 
 ## The flow
 
 ```
-client mints X-Operation-Id, runs step-up under it     challenge -> PASSED
+client mints X-Operation-ID, runs step-up under it     challenge -> PASSED
 │
-└─ PATCH /profile   X-Operation-Id: op-1
+└─ PATCH /profile   X-Operation-ID: op-1
    │
-   ├─ @falcon.before(idempotency_lookup)        RUNS FIRST
-   │     cached response for op-1?  ──►  return it, and NEVER reach the gate
+   ├─ the before-hooks run      authn · rate limit · entitlement · map_data
+   │     none of them touch the challenge
    │
-   └─ @falcon.before(require_operation_step_up(...))    adapters/hooks.py
+   └─ on_patch, INLINE
       │
-      ├─ operation_id = req.get_header("X-Operation-Id")
-      │     absent  ──►  Unauthenticated, and nothing is spent
+      ├─ idempotency.reserve(key, fingerprint)
+      │     MISMATCH     ──►  IdempotencyKeyReusedError
+      │     REPLAY       ──►  return the stored response   NOTHING SPENT
+      │     IN_PROGRESS  ──►  202                          NOTHING SPENT
+      │     RESERVED     ──►  a genuine first execution, continue
       │
-      ├─ session_ref, user_ref = refs(req)            your extractor
-      │
-      ├─ body_hash(await req.get_media())             your canonicalizer
-      │     get_media(), NEVER stream.read() -- see below
-      │
-      └─ verify_operation(...)                        assurance/operation.py
+      └─ verify_operation_for(req, verifier, refs, body_hash=...)  adapters/hooks.py
          │
-         ├─ POST …/operations/{operation_id}:verify   CONSUMES the challenge
-         │     410 / 8501  ──►  OperationChallengeMiss
-         │     403         ──►  AuthzUnavailable   our cert lacks step_up:verify
+         ├─ operation_id = req.get_header("X-Operation-ID")
+         │     absent  ──►  Unauthenticated, and nothing is spent
          │
-         ├─ target_session_tier < required
-         │       ──►  StepUpRequired   a real challenge, for a weaker policy
+         ├─ body_hash(await req.get_media())        your canonicalizer
+         │     get_media(), NEVER stream.read() -- see below
          │
-         ├─ request_body_hash != ours
-         │       ──►  OperationBodyMismatch
-         │
-         └─ ──►  OperationVerification, and the handler runs
+         └─ verify_operation(...)                   assurance/operation.py
+            │
+            ├─ POST …/operations/{id}:verify        CONSUMES the challenge
+            │     410 / 8501  ──►  OperationChallengeMiss
+            │     403         ──►  AuthzUnavailable   our cert lacks step_up:verify
+            │
+            ├─ target_session_tier < required  ──►  StepUpRequired
+            ├─ request_body_hash != ours       ──►  OperationBodyMismatch
+            └─ ──►  OperationVerification, then perform the write
 ```
 
 ---
 
 ## Three things that are not obvious
 
-### 1. The idempotency lookup **must** run first
+### 1. There is no `before` hook, and that is the design
 
-`X-Operation-Id` is also the idempotency key, so the same value identifies both the challenge
+`X-Operation-ID` is also the idempotency key, so the same value identifies both the challenge
 and the cached response. That is fine — until a response is lost in flight:
 
 ```
@@ -93,17 +107,27 @@ and the cached response. That is fine — until a response is lost in flight:
 7. the client gets an error instead of the cached response
 ```
 
-The retry the key exists to make safe is the one that breaks. **The fix is ordering**, not a
-second header: on a cache hit, return the stored response and never call `:verify`.
+The retry the key exists to make safe is the one that breaks. So the verify must come **after**
+the idempotency reservation, and only on the branch that says this is a genuine first
+execution.
 
-Falcon runs stacked `before` hooks **outermost-first** — the decorator listed first runs first.
-That is the reverse of what Python's decorator semantics suggest (the innermost *wraps* first
-but *executes* last), so it is measured and asserted rather than assumed.
+**A hook cannot express that**, because in this estate the reservation is taken *inline in the
+responder* — after every `before` hook has already run (see orders' `CreateOrderResource`). A
+hook would consume the challenge on every replay, before `reserve` was ever called.
 
-### 2. The hook reads the body with `get_media()`, never `stream.read()`
+And the coupling is structural, not incidental: `X-Operation-ID` **is** the idempotency key, so
+a route using per-operation step-up has idempotency by construction. A hook here is not
+"usually wrong"; it is wrong wherever the mechanism is used at all. So the package does not
+ship one, and a test asserts it does not — because a hook is the obvious thing to reach for.
 
-Body binding is caller-side, so the hook has to see the body. Reading the **stream** in a hook
-leaves the handler with nothing:
+Reuse the fingerprint the reservation already computes rather than writing a second
+canonicalizer. Orders does exactly this, and says why: two definitions of "canonical" over one
+body will drift, and the day they do, a body-bound challenge silently stops matching.
+
+### 2. The body is read with `get_media()`, never `stream.read()`
+
+Body binding is caller-side, so the helper has to see the body. Reading the **stream** leaves
+whichever of the two runs second with nothing:
 
 ```
 hook saw     : b'{"amount": 500}'
@@ -111,9 +135,9 @@ handler saw  : b''
 handler media: 400 "Could not parse an empty JSON body"
 ```
 
-`get_media()` caches the **deserialized** media, so hook and handler share one object. If that
-ever changes, per-operation step-up cannot be a `before` hook at all — which is why there is a
-test asserting the handler still sees its body.
+`get_media()` caches the **deserialized** media, so the helper and the rest of the responder
+share one object — whichever calls it first. There is a test asserting the handler still sees
+its body afterwards.
 
 ### 3. Consume-before-execute burns a challenge on a failed write
 
@@ -168,7 +192,7 @@ challenge quietly stops being body-bound.
 
 | Raised | Means | Client should |
 |---|---|---|
-| `Unauthenticated` | no `X-Operation-Id` on a route that needs one | mint one, run step-up |
+| `Unauthenticated` | no `X-Operation-ID` on a route that needs one | mint one, run step-up |
 | `OperationChallengeMiss` | unknown, unpassed, expired **or already consumed** | run step-up under a **new** operation id |
 | `OperationBodyMismatch` | not the act that was authorized | re-raise the challenge for this body |
 | `StepUpRequired` | real challenge, weaker tier than this route needs | raise a stronger challenge |
@@ -185,7 +209,7 @@ And note it is **not a retry**. That distinction is the whole reason it has its 
 ## What the package does not supply
 
 - **The canonicalizer.** Yours — it is a schema question.
-- **The idempotency store.** Yours, and it must run before this gate.
+- **The idempotency store.** Yours, and its reservation must resolve before this is called.
 - **The FE step-up flow.** The client passes the factor through auth's own
   `challenge:invoke` → `:authenticate`; the service that consumes the challenge never runs it.
   The `(session_ref, operation_id)` pair is a capability only the downstream service, holding

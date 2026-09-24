@@ -1,8 +1,9 @@
 """Tests for per-operation step-up.
 
-Two of these pin behaviours of Falcon itself rather than of this package -- hook ordering, and
-what reading the body in a hook does to the handler. Both are load-bearing for the design and
-both are the opposite of what a reader would assume, so they are asserted rather than trusted.
+The Falcon-level tests drive the shape orders' create API actually uses: the idempotency
+reservation is taken INLINE in the responder, and only a RESERVED outcome may spend a
+challenge. The replay and in-progress branches must return without touching it -- which is why
+there is no `before` hook for this, and why a test asserts there isn't one.
 """
 
 import falcon
@@ -16,7 +17,7 @@ from falcon_auth.assurance.operation import (
     OperationVerification,
     verify_operation,
 )
-from falcon_auth.adapters.hooks import require_operation_step_up
+from falcon_auth.adapters.hooks import verify_operation_for
 from falcon_auth.errors import AuthzUnavailable, StepUpRequired, Unauthenticated
 from falcon_auth.trustcontext import SESSION_TRUST_AUTHENTICATED, SESSION_TRUST_ELEVATED
 
@@ -114,28 +115,41 @@ async def test_an_unbound_challenge_needs_no_comparison():
     assert await verify_operation(v, "sess-1", "op-1", user_ref="user-1", body_hash="anything")
 
 
-# ── the Falcon hook ───────────────────────────────────────────────────────────
+# ── the inline form, and the reservation it must follow ──────────────────────
+#
+# There is no `before` hook for this, deliberately. X-Operation-ID is also the idempotency key,
+# and in this estate the reservation is taken INLINE in the responder -- after every hook has
+# run. A hook would consume the challenge on every replay, before `reserve` was called, turning
+# the replay path into "challenge already consumed". These tests drive the real shape.
 
 
-def _app(verifier, *, body_hash=None, extra_hook=None):
+class _Reservation:
+    RESERVED = "reserved"
+    REPLAY = "replay"
+    IN_PROGRESS = "in_progress"
+
+
+def _app(verifier, *, outcome=_Reservation.RESERVED, body_hash=None, stored=None):
     refs = lambda req: ("sess-1", "user-1")  # noqa: E731
-    gate = require_operation_step_up(verifier, refs, body_hash=body_hash)
 
     async def render(req, resp, ex, params):
         resp.status = falcon.HTTP_403
         resp.media = {"error": type(ex).__name__}
 
-    if extra_hook is not None:
-        class Resource:
-            @falcon.before(extra_hook)
-            @falcon.before(gate)
-            async def on_patch(self, req, resp):
-                resp.media = {"body": await req.get_media()}
-    else:
-        class Resource:
-            @falcon.before(gate)
-            async def on_patch(self, req, resp):
-                resp.media = {"body": await req.get_media()}
+    class Resource:
+        async def on_patch(self, req, resp):
+            # exactly orders' shape: reserve first, and only RESERVED may spend a challenge
+            if outcome is _Reservation.REPLAY:
+                resp.status = falcon.HTTP_200
+                resp.set_header("Idempotency-Replayed", "true")
+                resp.media = stored or {"replayed": True}
+                return
+            if outcome is _Reservation.IN_PROGRESS:
+                resp.status = falcon.HTTP_202
+                return
+
+            await verify_operation_for(req, verifier, refs, body_hash=body_hash)
+            resp.media = {"body": await req.get_media()}
 
     app = falcon.asgi.App()
     for exc in (OperationChallengeMiss, OperationBodyMismatch, StepUpRequired, Unauthenticated,
@@ -145,83 +159,82 @@ def _app(verifier, *, body_hash=None, extra_hook=None):
     return falcon.testing.TestClient(app)
 
 
-def test_the_hook_spends_the_challenge_and_lets_the_write_through():
+def test_a_genuine_first_execution_spends_the_challenge():
     v = _Verifier()
     r = _app(v).simulate_patch("/profile", json={"name": "x"},
-                               headers={"X-Operation-Id": "op-1"})
+                               headers={"X-Operation-ID": "op-1"})
     assert r.status_code == 200
     assert v.calls == [("sess-1", "op-1", "user-1")]
 
 
+def test_a_replay_returns_the_stored_response_without_spending_anything():
+    """THE case a before-hook could not serve. The challenge was consumed on the first attempt;
+    verifying again would answer OperationChallengeMiss and fail the exact retry the operation
+    id exists to make safe."""
+    v = _Verifier()
+    r = _app(v, outcome=_Reservation.REPLAY, stored={"order_id": 7}).simulate_patch(
+        "/profile", json={"name": "x"}, headers={"X-Operation-ID": "op-1"}
+    )
+    assert r.status_code == 200
+    assert r.json == {"order_id": 7}
+    assert v.calls == [], "a replay must not reach the challenge"
+
+
+def test_an_in_progress_reservation_does_not_spend_anything_either():
+    v = _Verifier()
+    r = _app(v, outcome=_Reservation.IN_PROGRESS).simulate_patch(
+        "/profile", json={}, headers={"X-Operation-ID": "op-1"}
+    )
+    assert r.status_code == 202
+    assert v.calls == []
+
+
 def test_a_mutation_with_no_operation_id_is_refused():
-    """A write needing per-operation step-up and carrying no operation id cannot be authorized
-    at all -- and the challenge is not spent finding that out."""
+    """And nothing is spent finding that out."""
     v = _Verifier()
     r = _app(v).simulate_patch("/profile", json={"name": "x"})
     assert r.status_code == 403
     assert r.json["error"] == "Unauthenticated"
-    assert v.calls == [], "nothing was spent"
+    assert v.calls == []
 
 
-def test_the_handler_still_sees_its_body_after_the_hook_hashed_it():
-    """THE constraint on this design. A hook that calls stream.read() leaves the handler an
-    empty body and get_media() then 400s with "Could not parse an empty JSON body". get_media()
-    caches the DESERIALIZED media, so hook and handler share one object.
-
-    Measured on Falcon 4.2. If this ever fails, per-operation step-up cannot be a before hook.
-    """
+def test_the_handler_still_sees_its_body_after_the_helper_hashed_it():
+    """A hook reading `stream.read()` leaves the handler b'' and get_media() then 400s with
+    "Could not parse an empty JSON body". get_media() caches the DESERIALIZED media, so both
+    sides share one object. Measured on Falcon 4.2."""
     seen = {}
 
     def hasher(media):
-        seen["hook_saw"] = media
+        seen["hasher_saw"] = media
         return "h"
 
     v = _Verifier(_verification(request_body_hash="h"))
     r = _app(v, body_hash=hasher).simulate_patch(
-        "/profile", json={"amount": 500}, headers={"X-Operation-Id": "op-1"}
+        "/profile", json={"amount": 500}, headers={"X-Operation-ID": "op-1"}
     )
     assert r.status_code == 200
-    assert seen["hook_saw"] == {"amount": 500}
-    assert r.json["body"] == {"amount": 500}, "the handler's body survived the hook"
+    assert seen["hasher_saw"] == {"amount": 500}
+    assert r.json["body"] == {"amount": 500}, "the handler's body survived"
 
 
-def test_a_body_mismatch_refuses_before_the_handler_runs():
+def test_a_body_mismatch_refuses_before_the_write():
     v = _Verifier(_verification(request_body_hash="for-500"))
     r = _app(v, body_hash=lambda m: "for-50000").simulate_patch(
-        "/profile", json={"amount": 50000}, headers={"X-Operation-Id": "op-1"}
+        "/profile", json={"amount": 50000}, headers={"X-Operation-ID": "op-1"}
     )
     assert r.status_code == 403
     assert r.json["error"] == "OperationBodyMismatch"
 
 
-# ── the ordering the idempotency key depends on ───────────────────────────────
+def test_the_header_is_spelled_as_the_estate_spells_it():
+    from falcon_auth.adapters.hooks import DEFAULT_OPERATION_HEADER
+
+    assert DEFAULT_OPERATION_HEADER == "X-Operation-ID"
 
 
-def test_falcon_runs_stacked_hooks_outermost_first():
-    """Load-bearing, and the reverse of what Python's decorator semantics suggest: the
-    innermost decorator WRAPS first but EXECUTES last.
+def test_there_is_no_before_hook_for_this():
+    """Asserted, because a hook is the obvious thing to reach for and it is wrong here -- it
+    would run before the inline reservation and spend a challenge on every replay."""
+    from falcon_auth.adapters import hooks
 
-    The idempotency lookup must run before the step-up verify. A retry whose first response was
-    lost has to return the cached response WITHOUT reaching the gate -- the challenge was
-    consumed on the first attempt, so verifying again answers OperationChallengeMiss and fails
-    the exact retry X-Operation-Id exists to make safe.
-    """
-    order = []
-
-    async def idempotency(req, resp, resource, params, *_a, **_kw):
-        order.append("idempotency")
-
-    v = _Verifier()
-
-    class RecordingVerifier(_Verifier):
-        async def verify(self, *a, **kw):
-            order.append("step-up")
-            return await super().verify(*a, **kw)
-
-    client = _app(RecordingVerifier(), extra_hook=idempotency)
-    client.simulate_patch("/profile", json={}, headers={"X-Operation-Id": "op-1"})
-
-    assert order == ["idempotency", "step-up"], (
-        "the idempotency lookup must run first, or an idempotent retry burns into a consumed "
-        "challenge"
-    )
+    assert not hasattr(hooks, "require_operation_step_up")

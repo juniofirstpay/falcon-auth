@@ -200,7 +200,7 @@ second, invisible configuration surface.
 | Bound to | nothing in particular | the request body |
 | Use for | a **read** | a **write** |
 | Where | `assurance/stepup.py` | `assurance/operation.py` |
-| Gate | `require_elevated` | `require_operation_step_up` |
+| Gate | `require_elevated`, a decorator | `verify_operation_for`, called inline |
 
 Both live here, and a single resource legitimately carries both — the window on its `GET`, the
 per-operation challenge on its `PATCH`. That is the intended shape, not a redundancy: the two

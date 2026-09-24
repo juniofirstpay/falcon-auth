@@ -21,20 +21,20 @@ mutation and perform the write only on success: consuming afterwards would let a
 write and consume authorize a second execution. The cost is accepted and real -- if the write
 then fails, the challenge is gone and the user must step up again rather than retry.
 
-THE ORDERING THAT MATTERS, and it is not optional. ``X-Operation-Id`` is also the idempotency
-key, so the same value identifies the challenge AND the cached response. A retry of a request
-whose response was lost in flight must return that cached response and must NOT reach here --
-the challenge was consumed on the first attempt and this would answer
-:class:`OperationChallengeMiss`, turning the exact retry the key exists to make safe into a
-failure. So the idempotency lookup runs FIRST and returns early on a hit::
+THE ORDERING THAT MATTERS, and it is why there is no ``before`` hook for this.
+``X-Operation-ID`` is also the idempotency key, so the same value identifies the challenge AND
+the cached response. A retry whose first response was lost must return that cached response and
+must NOT reach here -- the challenge was consumed on the first attempt, so this would answer
+:class:`OperationChallengeMiss` and fail the exact retry the key exists to make safe.
 
-    @falcon.before(idempotency_lookup)                 # runs first -- a hit returns early
-    @falcon.before(require_operation_step_up(...))     # only a genuine first execution reaches here
-    async def on_patch(self, req, resp): ...
+The verify therefore belongs AFTER the idempotency reservation, on the branch that says this is
+a genuine first execution -- and in this estate that reservation is taken INLINE in the
+responder, after every hook has run. A hook would spend the challenge on every replay. Since
+``X-Operation-ID`` *is* the idempotency key, a route using this mechanism has idempotency by
+construction, so a hook is wrong wherever it would be used at all.
 
-Falcon runs stacked ``before`` hooks outermost-first, which is the reverse of what Python's
-decorator semantics suggest -- the innermost decorator wraps first but executes last. Measured,
-not assumed, and asserted in ``tests/test_assurance_operation.py``.
+Call :func:`falcon_auth.adapters.hooks.verify_operation_for` from the responder instead, and
+reuse the fingerprint the reservation already computes rather than defining "canonical" twice.
 
 BODY BINDING IS CALLER-SIDE. Auth stores the body hash the challenge was raised against and
 returns it rather than comparing, because canonicalizing a body is the consuming service's

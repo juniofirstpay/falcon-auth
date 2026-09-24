@@ -155,83 +155,83 @@ def require_elevated(client: TrustContextClient, refs: RefExtractor) -> HookFn:
 
 
 
-#: Where the client's operation id arrives. A header rather than a body field so the value is
-#: readable without consuming the body, and so it survives a body this service does not parse.
-DEFAULT_OPERATION_HEADER = "X-Operation-Id"
+#: Where the client's operation id arrives. Spelled as the estate spells it. `get_header` is
+#: case-insensitive, so the casing is a readability choice, not a functional one.
+DEFAULT_OPERATION_HEADER = "X-Operation-ID"
 
 
-def require_operation_step_up(
+async def verify_operation_for(
+    req: falcon.asgi.Request,
     verifier: OperationVerifier,
     refs: RefExtractor,
     *,
     body_hash: BodyHasher | None = None,
     required_tier: int = SESSION_TRUST_ELEVATED,
     operation_header: str = DEFAULT_OPERATION_HEADER,
-) -> HookFn:
-    """Gate a MUTATION on a step-up passed for this specific operation.
+) -> Any:
+    """Consume this request's step-up challenge. **Call it from inside the handler.**
 
-    Use this, never :func:`require_elevated`, on a write. An elevation window authorizes a
-    period; this authorizes an act. The same resource legitimately carries both -- the window
-    on its GET, this on its PATCH.
+    THERE IS DELIBERATELY NO `before` HOOK FOR THIS, and the reason is the whole design.
 
-    ORDER IT AFTER THE IDEMPOTENCY LOOKUP. ``X-Operation-Id`` is also the idempotency key, so a
-    retry whose first response was lost must return the cached response WITHOUT reaching here:
-    the challenge was consumed on the first attempt and this would answer
-    `OperationChallengeMiss`, failing the exact retry the key exists to make safe::
+    ``X-Operation-ID`` is also the idempotency key, so a route using per-operation step-up has
+    idempotency by construction -- and in this estate the idempotency reservation is taken
+    INLINE in the responder, after every hook has already run. A hook would therefore consume
+    the challenge on every replay, before ``reserve`` was ever called, and the replay path
+    (answer the stored response) would answer "challenge already consumed" instead. That is the
+    exact retry the operation id exists to make safe.
 
-        @falcon.before(idempotency_lookup)                # runs FIRST, returns early on a hit
-        @falcon.before(require_operation_step_up(...))    # only a real first execution
-        async def on_patch(self, req, resp): ...
+    So the ordering cannot be expressed with decorators; it belongs to the handler, which is the
+    only thing that knows whether this is a genuine first execution::
 
-    Falcon runs stacked hooks outermost-first -- the reverse of what Python's decorator
-    semantics suggest. Measured, and asserted in the tests.
+        reservation, stored = await idempotency.reserve(key=key, fingerprint=fingerprint)
+        if reservation is Reservation.MISMATCH:
+            raise IdempotencyKeyReusedError()
+        if reservation is Reservation.REPLAY:
+            resp.media = stored                      # never verify -- already spent
+            return
+        if reservation is Reservation.IN_PROGRESS:
+            resp.status = falcon.HTTP_202            # never verify -- still running
+            return
+
+        # RESERVED: a genuine first execution, and the only branch that may spend a challenge.
+        await verify_operation_for(req, verifier, refs, body_hash=quote_digest)
+        ...perform the write...
+
+    Reuse the fingerprint the idempotency reservation already computes rather than writing a
+    second canonicalizer: two definitions of "canonical" over one body will drift, and the day
+    they do, a body-bound challenge silently stops matching.
 
     :param body_hash: this service's canonicalizer, taking the parsed media and returning the
-        hash to compare against the one the challenge was bound to. Omit it only for purposes
-        that are not body-bound; if the challenge IS bound and no hasher was supplied, the
-        verification refuses rather than spending a binding it cannot honour.
+        hash to compare with the one the challenge was bound to.
 
-    Raises `OperationChallengeMiss` (run step-up again under a new operation id),
-    `OperationBodyMismatch` (this is not the act that was authorized), `StepUpRequired` (the
-    challenge authorized a weaker tier) or `AuthzUnavailable` (the lookup failed).
+    Raises `Unauthenticated` (no operation id), `OperationChallengeMiss` (run step-up again
+    under a new id), `OperationBodyMismatch` (not the act that was authorized), `StepUpRequired`
+    (a weaker challenge than this route needs) or `AuthzUnavailable`.
     """
-
-    async def hook(
-        req: falcon.asgi.Request,
-        resp: falcon.asgi.Response,
-        resource: object,
-        params: dict[str, Any],
-        *_a: Any,
-        **_kw: Any,
-    ) -> None:
-        operation_id = req.get_header(operation_header)
-        if not operation_id:
-            # A mutation that needs per-operation step-up and carries no operation id cannot be
-            # authorized at all. Fail closed, and say which header is missing.
-            raise Unauthenticated(
-                f"this operation requires step-up; no {operation_header} on the request"
-            )
-
-        session_ref, user_ref = refs(req)
-
-        computed: str | None = None
-        if body_hash is not None:
-            # get_media(), NEVER stream.read(). Falcon caches the DESERIALIZED media, so the
-            # handler's own get_media() returns the same object -- whereas reading the stream
-            # here leaves the handler an empty body and a 400 "Could not parse an empty JSON
-            # body". Measured on Falcon 4.2; see the tests.
-            computed = body_hash(await req.get_media())
-
-        await verify_operation(
-            verifier,
-            session_ref,
-            operation_id,
-            user_ref=user_ref,
-            body_hash=computed,
-            required_tier=required_tier,
+    operation_id = req.get_header(operation_header)
+    if not operation_id:
+        raise Unauthenticated(
+            f"this operation requires step-up; no {operation_header} on the request"
         )
 
-    return hook
+    session_ref, user_ref = refs(req)
+
+    computed: str | None = None
+    if body_hash is not None:
+        # get_media(), NEVER stream.read(). Falcon caches the DESERIALIZED media, so a handler
+        # that already called get_media() shares this object and one that calls it afterwards
+        # still gets a body. Reading the stream would leave whichever runs second with b''.
+        computed = body_hash(await req.get_media())
+
+    return await verify_operation(
+        verifier,
+        session_ref,
+        operation_id,
+        user_ref=user_ref,
+        body_hash=computed,
+        required_tier=required_tier,
+    )
+
 
 __all__ = (
     "DEFAULT_OPERATION_HEADER",
@@ -242,8 +242,8 @@ __all__ = (
     "require",
     "require_callback",
     "require_elevated",
-    "require_operation_step_up",
     "require_service_scope",
+    "verify_operation_for",
 )
 
 

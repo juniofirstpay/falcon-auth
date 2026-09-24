@@ -30,6 +30,9 @@ Modules:
                         principal_from_request
     errors.py           register_error_handlers · render_svcplane_error
     authenticators.py   RemoteJWKSAuthenticator
+    hooks.py            ... plus verify_operation_for -- per-operation step-up, called
+                        INLINE from a responder rather than as a hook, because the
+                        idempotency reservation it must follow is itself inline
     routing.py          PlaneRegistry · mount · verify_app -- one plane per endpoint,
                         refused at startup (C-006)
     middleware.py       PlaneAuthenticationMiddleware -- the per-request assertion that the
@@ -67,7 +70,7 @@ from .hooks import (
     principal_from_request,
     require_callback,
     require_elevated,
-    require_operation_step_up,
+    verify_operation_for,
     require_service_scope,
 )
 
@@ -94,7 +97,7 @@ __all__ = (
     "require",
     "require_callback",
     "require_elevated",
-    "require_operation_step_up",
+    "verify_operation_for",
     "require_service_scope",
     "UnregisteredRoute",
     "verify_app",
