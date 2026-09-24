@@ -30,7 +30,7 @@ Pin a `ref`. This package sits on the authorization path of every consuming serv
 |---|---|---|
 | `eastwest/` | is this peer service who its certificate says, and does it hold this scope | `Verifier` · `build_allow_list` · `peer_cn` |
 | `identity/` | who is this user | `JWKSStore` · `JWKSVerifier` |
-| `assurance/` | how strongly, how recently | `check_session_elevated` · `StepUpRequired` |
+| `assurance/` | how strongly, how recently | `check_session_elevated` · `verify_operation` |
 | `entitlement/` | what class of thing may they do | `AuthServiceResolver` · `CapabilityEnforcer` · `verify_policy` |
 
 Three modules sit above them, because they are the shared vocabulary the package exists to unify — none ever moves inside a part:
@@ -77,14 +77,14 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 243 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 256 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
 | `eastwest/` | verifier · errors · mtls |
 | `identity/` | JWKS store, verifier, Falcon authenticator |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
-| `assurance/` | the step-up gate |
+| `assurance/` | the elevation-window gate, and the per-operation challenge gate |
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks |
 | `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, one method per plane, and the wrong-plane 404 |
 
@@ -103,5 +103,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 [`docs/IDENTITY.md`](docs/IDENTITY.md) covers the user plane: how a JWT is checked against the issuer's rotating keyring, why the algorithm is pinned server-side, and why the claim allowlist has no default.
 
 [`docs/ASSURANCE.md`](docs/ASSURANCE.md) covers step-up: the two session-trust tiers, why the read is never cached, and why a step-up refusal is a challenge rather than a denial.
+
+[`docs/OPERATION-STEPUP.md`](docs/OPERATION-STEPUP.md) covers the other step-up mechanism: a challenge passed for one specific act, consumed on use and bound to the request body — the one a mutation must use, and why an elevation window is not it.
 
 [`docs/ENTITLEMENT.md`](docs/ENTITLEMENT.md) covers authorization: the three levels grant/entitlement/capability, the two-layer casbin policy, any-of alternatives, and the two build-time checks the engine cannot make itself.

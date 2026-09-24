@@ -98,7 +98,16 @@ from .trustcontext import (
     TrustContextCache,
     TrustContextClient,
 )
-from .assurance import check_session_elevated
+from .assurance import (
+    BodyHasher,
+    HttpOperationVerifier,
+    OperationBodyMismatch,
+    OperationChallengeMiss,
+    OperationVerification,
+    OperationVerifier,
+    verify_operation,
+    check_session_elevated,
+)
 from .entitlement import (
     FlatnessError,
     PolicyError,
@@ -130,6 +139,7 @@ __all__ = (
     "AuthServiceResolver",
     "AuthzError",
     "AuthzUnavailable",
+    "BodyHasher",
     "build_allow_list",
     "build_enforcer",
     "build_uvicorn_ssl_kwargs",
@@ -147,6 +157,7 @@ __all__ = (
     "EastWestKind",
     "FlatnessError",
     "GrantAllResolver",
+    "HttpOperationVerifier",
     "HttpTrustContextClient",
     "InvalidToken",
     "JWKSStore",
@@ -161,6 +172,10 @@ __all__ = (
     "MissingScopeError",
     "normalise_registry",
     "NullCache",
+    "OperationBodyMismatch",
+    "OperationChallengeMiss",
+    "OperationVerification",
+    "OperationVerifier",
     "peer_cn",
     "PeerCertH11Protocol",
     "PeerCertHttpToolsProtocol",
@@ -188,6 +203,7 @@ __all__ = (
     "UnregisteredGrant",
     "UserPrincipal",
     "Verifier",
+    "verify_operation",
     "verify_policy",
     "__version__",
 )

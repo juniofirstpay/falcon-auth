@@ -191,22 +191,29 @@ second, invisible configuration surface.
 
 ---
 
-## What this does NOT cover
-
-**General elevation only** — the session-wide, window-bounded tier. There are two step-up
-mechanisms and they are **not interchangeable**:
+## Two mechanisms, and they are not interchangeable
 
 | | General elevation | Per-operation step-up |
 |---|---|---|
 | Scope | the whole session | one specific act |
 | Bounded by | a time window | a single consumed challenge |
 | Bound to | nothing in particular | the request body |
-| Here? | **yes** | **no** |
+| Use for | a **read** | a **write** |
+| Where | `assurance/stepup.py` | `assurance/operation.py` |
+| Gate | `require_elevated` | `require_operation_step_up` |
+
+Both live here, and a single resource legitimately carries both — the window on its `GET`, the
+per-operation challenge on its `PATCH`. That is the intended shape, not a redundancy: the two
+gates happen to report the same tier while answering different questions, one about a **state**
+and one about an **act**.
 
 A **mutation must never be gated on an elevation window.** A window authorizes a *period*, not
 an *act* — so one step-up would authorize every write until it expires. That is not a smaller
-version of the same control; it is a different one. Per-operation step-up is a separate,
-consumed, body-bound challenge and is not implemented in this package.
+version of the same control; it is a different one.
+
+See [`OPERATION-STEPUP.md`](OPERATION-STEPUP.md) for the per-operation mechanism: what it
+consumes, why the idempotency lookup must run before it, and why the hook reads the body with
+`get_media()` and never `stream.read()`.
 
 ---
 

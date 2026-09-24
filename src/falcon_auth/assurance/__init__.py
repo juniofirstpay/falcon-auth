@@ -11,9 +11,14 @@ device must not keep transacting for the length of a cache window. Entitlements 
 this does not.
 
 Two failure modes stay distinct. `StepUpRequired` means the session is live but not elevated
-(the consumer answers 403). `TrustContextUnavailable` means the lookup itself failed (503).
+(the consumer answers 403). `AuthzUnavailable` means the lookup itself failed (503).
 Collapsing them sends a user to complete a challenge that cannot help, and charges an
 infrastructure fault to them.
+
+**Two step-up mechanisms live here, and they are not interchangeable.** `stepup` gates on
+the session-wide elevation WINDOW -- correct for a read. `operation` gates on a challenge
+passed for one specific act, consumed on use and bound to the request body -- the only one
+correct for a mutation, because a window authorizes a period rather than an act.
 
 The trust tiers and the client live in the package root (`trustcontext`), because
 `entitlement` reads the same response for a different field. This part contributes the
@@ -22,6 +27,26 @@ policy, not a second lookup.
 
 from __future__ import annotations
 
+from .operation import (
+    AUTH_CODE_OPERATION_MISS,
+    BodyHasher,
+    HttpOperationVerifier,
+    OperationBodyMismatch,
+    OperationChallengeMiss,
+    OperationVerification,
+    OperationVerifier,
+    verify_operation,
+)
 from .stepup import check_session_elevated
 
-__all__ = ("check_session_elevated",)
+__all__ = (
+    "AUTH_CODE_OPERATION_MISS",
+    "BodyHasher",
+    "check_session_elevated",
+    "HttpOperationVerifier",
+    "OperationBodyMismatch",
+    "OperationChallengeMiss",
+    "OperationVerification",
+    "OperationVerifier",
+    "verify_operation",
+)

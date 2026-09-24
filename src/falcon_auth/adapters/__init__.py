@@ -59,6 +59,7 @@ from .routing import (
     verify_app,
 )
 from .hooks import (
+    DEFAULT_OPERATION_HEADER,
     PRINCIPAL_ATTR,
     HookFn,
     RefExtractor,
@@ -66,6 +67,7 @@ from .hooks import (
     principal_from_request,
     require_callback,
     require_elevated,
+    require_operation_step_up,
     require_service_scope,
 )
 
@@ -73,6 +75,7 @@ __all__ = (
     "AUTH_METHOD_ATTR",
     "AUTH_PRINCIPAL_ATTR",
     "Authenticator",
+    "DEFAULT_OPERATION_HEADER",
     "DEFAULT_PROBE_PATHS",
     "Endpoint",
     "HookFn",
@@ -91,6 +94,7 @@ __all__ = (
     "require",
     "require_callback",
     "require_elevated",
+    "require_operation_step_up",
     "require_service_scope",
     "UnregisteredRoute",
     "verify_app",

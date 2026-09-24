@@ -34,6 +34,8 @@ from typing import Any, Awaitable, Callable
 import falcon
 import falcon.asgi
 
+from ..assurance.operation import BodyHasher, OperationVerifier, verify_operation
+from ..trustcontext import SESSION_TRUST_ELEVATED
 from ..assurance.stepup import check_session_elevated
 from ..entitlement.enforcer import CapabilityEnforcer
 from ..entitlement.resolver import Resolver
@@ -152,7 +154,87 @@ def require_elevated(client: TrustContextClient, refs: RefExtractor) -> HookFn:
     return hook
 
 
+
+#: Where the client's operation id arrives. A header rather than a body field so the value is
+#: readable without consuming the body, and so it survives a body this service does not parse.
+DEFAULT_OPERATION_HEADER = "X-Operation-Id"
+
+
+def require_operation_step_up(
+    verifier: OperationVerifier,
+    refs: RefExtractor,
+    *,
+    body_hash: BodyHasher | None = None,
+    required_tier: int = SESSION_TRUST_ELEVATED,
+    operation_header: str = DEFAULT_OPERATION_HEADER,
+) -> HookFn:
+    """Gate a MUTATION on a step-up passed for this specific operation.
+
+    Use this, never :func:`require_elevated`, on a write. An elevation window authorizes a
+    period; this authorizes an act. The same resource legitimately carries both -- the window
+    on its GET, this on its PATCH.
+
+    ORDER IT AFTER THE IDEMPOTENCY LOOKUP. ``X-Operation-Id`` is also the idempotency key, so a
+    retry whose first response was lost must return the cached response WITHOUT reaching here:
+    the challenge was consumed on the first attempt and this would answer
+    `OperationChallengeMiss`, failing the exact retry the key exists to make safe::
+
+        @falcon.before(idempotency_lookup)                # runs FIRST, returns early on a hit
+        @falcon.before(require_operation_step_up(...))    # only a real first execution
+        async def on_patch(self, req, resp): ...
+
+    Falcon runs stacked hooks outermost-first -- the reverse of what Python's decorator
+    semantics suggest. Measured, and asserted in the tests.
+
+    :param body_hash: this service's canonicalizer, taking the parsed media and returning the
+        hash to compare against the one the challenge was bound to. Omit it only for purposes
+        that are not body-bound; if the challenge IS bound and no hasher was supplied, the
+        verification refuses rather than spending a binding it cannot honour.
+
+    Raises `OperationChallengeMiss` (run step-up again under a new operation id),
+    `OperationBodyMismatch` (this is not the act that was authorized), `StepUpRequired` (the
+    challenge authorized a weaker tier) or `AuthzUnavailable` (the lookup failed).
+    """
+
+    async def hook(
+        req: falcon.asgi.Request,
+        resp: falcon.asgi.Response,
+        resource: object,
+        params: dict[str, Any],
+        *_a: Any,
+        **_kw: Any,
+    ) -> None:
+        operation_id = req.get_header(operation_header)
+        if not operation_id:
+            # A mutation that needs per-operation step-up and carries no operation id cannot be
+            # authorized at all. Fail closed, and say which header is missing.
+            raise Unauthenticated(
+                f"this operation requires step-up; no {operation_header} on the request"
+            )
+
+        session_ref, user_ref = refs(req)
+
+        computed: str | None = None
+        if body_hash is not None:
+            # get_media(), NEVER stream.read(). Falcon caches the DESERIALIZED media, so the
+            # handler's own get_media() returns the same object -- whereas reading the stream
+            # here leaves the handler an empty body and a 400 "Could not parse an empty JSON
+            # body". Measured on Falcon 4.2; see the tests.
+            computed = body_hash(await req.get_media())
+
+        await verify_operation(
+            verifier,
+            session_ref,
+            operation_id,
+            user_ref=user_ref,
+            body_hash=computed,
+            required_tier=required_tier,
+        )
+
+    return hook
+
 __all__ = (
+    "DEFAULT_OPERATION_HEADER",
     "HookFn",
     "PRINCIPAL_ATTR",
     "RefExtractor",
@@ -160,6 +242,7 @@ __all__ = (
     "require",
     "require_callback",
     "require_elevated",
+    "require_operation_step_up",
     "require_service_scope",
 )
 
