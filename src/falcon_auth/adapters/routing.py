@@ -333,9 +333,24 @@ def responder_methods(resource: Any, suffix: str | None = None) -> list[str]:
 def version_of(path: str) -> str | None:
     """The API version segment of ``path``, per C-039: the version is the FIRST path segment.
 
-    ``None`` for a path with no version segment, which is not an error here -- probe paths and
-    callback paths legitimately have none. C-039 conformance for caller-facing routes is its own
-    check; this function only reports what the path says.
+    ``None`` for a path with no version segment. This REPORTS; it does not refuse.
+
+    NOT ENFORCING IS DELIBERATE (issue #1 A9). C-039 is ratified and mandatory, and `mount` is
+    the natural chokepoint -- it already refuses four other things at boot. But no consumer
+    route carries a version segment today: orders mounts ``/orders:validate`` and
+    ``/orders/{order_id}:refund``, and C-039's own "Implemented at" counts 112 unversioned
+    routes across auth, persona and payments. Enforcing here would not find a bug; it would
+    refuse to start every service until a migration the convention describes as a big-bang
+    re-path -- a public API break for every mobile call, FE call and peer URL -- is complete.
+
+    And the check is not simply "does it start with /vN". C-039 gives callback and webhook URLs
+    a DIFFERENT migration shape: a vendor holds the registered URL, so both forms are served
+    until that vendor migrates. An unversioned CALLBACK route is therefore correct for as long
+    as the rail has not moved -- orders has one today. Probe paths are a third case, outside the
+    plane system entirely (RUL-033). Written before the per-service migration shape is settled,
+    the check would encode a guess.
+
+    When consumers have re-pathed, this belongs in `register` beside the other refusals.
     """
     head = path.lstrip("/").split("/", 1)[0]
     if len(head) >= 2 and head[0] == "v" and head[1:].isdigit():

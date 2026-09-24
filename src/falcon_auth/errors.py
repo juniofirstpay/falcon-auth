@@ -29,6 +29,20 @@ logged-out session as `503` tells the client to retry a request that will never 
 genuine outage as `403` tells it to give up on one that would. It subclasses `CapabilityDenied` so a
 host that does not care gets the right status for free, and one that does can still tell them apart.
 
+**On `StepUpRequired` being 403 (issue #1 A16).** A draft platform code, `PLAT0109`, is said to
+put this at 401. It is deferred because that code DOES NOT EXIST: there is no `PLAT0109` in
+`platform-conventions`, no step-up code of any number, and the cited `registry/errors/README.md`
+is not in the repo. There is nothing to conform to yet.
+
+When it lands we would argue for 403 rather than adopt 401, for three reasons worth stating
+before a code is allocated. `PLAT0106 session_not_live` is already 403 with "Your session has
+ended. Please sign in again." -- the same shape, and auth's own `8400 scope_insufficient` and
+`8503 device_trust_insufficient` are 403 too. A 401 invites the wrong client reflex: many
+clients and gateways treat it as "refresh the token and retry", which can never resolve here
+because the token is valid and what is missing is a FACTOR. And the status is not carrying the
+signal anyway -- this class deliberately does not subclass `CapabilityDenied`, so a host maps it
+explicitly, and `required` / `present` ride in `extras` for the client to branch on.
+
 **A `403` from the auth service is `AuthzUnavailable`, never a denial.** It means *our* client
 certificate lacks the `trust:read` scope -- a deployment fault. Surfacing it as a user denial would
 turn a misconfigured rollout into "every user suddenly lacks permissions", which is the wrong page to
