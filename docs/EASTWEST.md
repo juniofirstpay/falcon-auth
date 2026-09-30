@@ -221,11 +221,20 @@ What refuses boot, and what only warns:
 | Condition | Outcome |
 |---|---|
 | a route demands a capability with no registry row | **raises at decoration** — the #8 typo |
-| an allow-list row still lists capabilities | **refused** — they would be enforced by nothing |
+| an allow-list row still lists capabilities | **ignored**, with one boot warning naming the CNs — see below |
 | a SERVICE row names a peer the policy does not declare | **refused** — a typo'd `source` |
 | a peer row names an entitlement that opens nothing | **refused** by `verify_policy` |
 | a peer named like a grant or an entitlement, or a third hop | **refused** by `verify_policy` |
 | a declared peer bound by no CN in this environment | a boot **warning** — it may not exist here |
+
+**Switching a service over.** Code and the Vault-rendered config ship separately, and both are
+read at boot. That is why leftover capabilities are ignored rather than refused: refusing would
+force both into the same restart, and an unrelated restart in between would either stop the
+service booting or give every peer nothing. The safe order is:
+
+1. ship the code in policy mode — boot warns `svcplane_allow_list_capabilities_ignored`;
+2. remove `capabilities` / `scopes` from the SERVICE rows in Vault;
+3. a later release turns the warning into a refusal.
 
 The check itself lives in `entitlement/` and the hook, never in `eastwest/`: east-west establishes
 who called, and only `entitlement/` decides. `build_allow_list` gets the peer names as a plain set.

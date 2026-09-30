@@ -206,23 +206,38 @@ def test_the_enforcer_exposes_peer_names_as_a_plain_set():
 # ─── C-056: the allow-list in policy mode ────────────────────────────────────
 
 
-def test_policy_mode_refuses_a_row_still_carrying_capabilities():
-    rows = [{"cn": "a.svc", "kind": "SERVICE", "source": "payments", "capabilities": ["kyc:read"]}]
-    with pytest.raises(ValueError, match="C-056"):
-        build_allow_list(rows, peers={"payments"})
+@pytest.mark.parametrize("key", ["capabilities", "scopes"])
+def test_policy_mode_ignores_leftover_capabilities_and_says_so_once(key):
+    """Code and config ship separately and both are read at boot. Refusing leftovers would force
+    them into one restart; ignoring them lets the order be: ship the code, then clean the config."""
+    rows = [
+        {"cn": "a.svc", "kind": "SERVICE", "source": "payments", key: ["kyc:write"]},
+        {"cn": "b.svc", "kind": "SERVICE", "source": "payments", key: ["kyc:read"]},
+    ]
+    with capture_logs() as logs:
+        allow = build_allow_list(rows, peers={"payments"})
+    assert allow["a.svc"].capabilities == frozenset()  # dropped, not carried
+    ignored = [e for e in logs if e["event"] == "svcplane_allow_list_capabilities_ignored"]
+    assert len(ignored) == 1 and ignored[0]["cns"] == ["a.svc", "b.svc"]
 
 
-def test_policy_mode_refuses_the_old_key_too():
-    rows = [{"cn": "a.svc", "kind": "SERVICE", "source": "payments", "scopes": ["kyc:read"]}]
-    with pytest.raises(ValueError, match="C-056"):
-        build_allow_list(rows, peers={"payments"})
+async def test_a_leftover_capability_opens_nothing():
+    """The leftover says kyc:write; the policy says payments holds only kyc:read. The policy wins."""
+    enforcer = build_enforcer(REGISTRY, peers=PEERS)
+    rows = [{"cn": "p.svc", "kind": "SERVICE", "source": "payments", "capabilities": ["kyc:write"]}]
+    verifier = Verifier(build_allow_list(rows, peers=enforcer.peers))
+    hook = require_service_capability(verifier, "kyc:write", enforcer=enforcer)
+    with pytest.raises(MissingCapabilityError):
+        await hook(_Req("p.svc"), None, None, {})
 
 
 def test_an_empty_capability_list_is_not_a_leftover():
     """Callback rows are often written `scopes: []`. An empty list grants nothing, so it is not
-    refused -- only a list that would have granted something is."""
+    reported -- only a list that would have granted something is."""
     rows = [{"cn": "rail.svc", "kind": "CALLBACK", "source": "rail", "scopes": []}]
-    build_allow_list(rows, peers={"payments"})
+    with capture_logs() as logs:
+        build_allow_list(rows, peers={"payments"})
+    assert not [e for e in logs if e["event"] == "svcplane_allow_list_capabilities_ignored"]
 
 
 def test_policy_mode_refuses_a_service_row_naming_an_unknown_peer():

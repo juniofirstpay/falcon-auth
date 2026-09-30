@@ -160,16 +160,24 @@ def build_allow_list(
         three boot checks, because the config now binds certificates to peers and the code says
         what peers may do, and the two are written in different repositories:
 
-            a row still carrying capabilities      refused -- authorization is policy rows now,
-                                                   and a capability left here is enforced by
-                                                   nothing, which is worse than refused
+            a row still carrying capabilities      IGNORED, with one boot warning naming the
+                                                   CNs -- the policy decides now, and nothing
+                                                   reads them
             a SERVICE row naming an unknown peer   refused -- a typo'd ``source`` is a peer
                                                    holding nothing, silently
             a declared peer bound by no CN         a boot WARNING only -- a peer may simply
                                                    not exist in this environment
+
+        Why the leftovers warn rather than refuse: the code and the Vault-rendered config ship
+        separately, and both are read at boot. Refusing would force them into the SAME restart --
+        old code with the capabilities already removed gives every peer nothing, and new code
+        with them still present would not boot -- and an unrelated restart between the two
+        (autoscaling, a crash) would hit one or the other. Ignoring them lets the order be: ship
+        the code, then clean the config. A later release turns the warning into a refusal.
     """
     allow: AllowList = {}
     old_key_cns: list[str] = []
+    leftover_cns: list[str] = []
     for entry in entries:
         cn = _get(entry, "cn")
         kind = _get(entry, "kind")
@@ -199,7 +207,12 @@ def build_allow_list(
                 f"replace the first, so a capability could be granted or lost by row order"
             )
         if peers is not None:
-            _check_policy_row(cn, kind, source, capabilities, peers)
+            _check_policy_row(cn, kind, source, peers)
+            if capabilities:
+                leftover_cns.append(cn)
+                # Dropped, not carried: in policy mode nothing may read them, so a principal
+                # holding them would be a second, unreviewed source of truth waiting for a caller.
+                capabilities = []
         allow[cn] = Principal(
             cn=cn,
             kind=kind,
@@ -215,6 +228,12 @@ def build_allow_list(
             use="capabilities",
             cns=sorted(old_key_cns),
         )
+    if leftover_cns:
+        logger.warning(
+            "svcplane_allow_list_capabilities_ignored",
+            reason="policy mode (C-056): the policy decides; remove them from the allow-list",
+            cns=sorted(leftover_cns),
+        )
     if peers is not None:
         bound = {p.source for p in allow.values() if p.kind == SERVICE}
         unbound = sorted(set(peers) - bound)
@@ -223,16 +242,7 @@ def build_allow_list(
     return allow
 
 
-def _check_policy_row(
-    cn: str, kind: str, source: Any, capabilities: list[str], peers: Collection[str]
-) -> None:
-    if capabilities:
-        raise ValueError(
-            f"svcplane allow_list entry cn={cn!r} still lists capabilities "
-            f"{sorted(capabilities)}, but this service authorizes peers in its policy (C-056): "
-            f"the allow-list says which peer a certificate IS, and `g` rows in code say what it "
-            f"may do. Move them to the policy and drop the key"
-        )
+def _check_policy_row(cn: str, kind: str, source: Any, peers: Collection[str]) -> None:
     if kind == SERVICE and source not in peers:
         raise ValueError(
             f"svcplane allow_list entry cn={cn!r} binds to peer source={source!r}, which this "
