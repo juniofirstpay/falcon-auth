@@ -316,3 +316,75 @@ def test_at_most_one_secondary_is_verified():
     )
     assert r.status_code == 401
     assert len(verified) == 1, f"verified {verified}; Q88 allows one secondary"
+
+
+# ── verify(): coverage checked at boot, not at first request ──────────────────
+
+
+def test_verify_refuses_a_plane_with_no_authenticator():
+    """The same check _primary_for makes, hoisted to boot. That one fires on the FIRST REQUEST
+    to a route -- too late once this middleware is the only thing authenticating: a mis-wired
+    plane looks healthy through deploy and smoke tests and is found by a caller.
+
+    It is also per-route lazy, so a rarely-called service-plane endpoint can stay broken while
+    everything else passes.
+    """
+    registry = PlaneRegistry()
+    app = falcon.asgi.App()
+    mount(registry, app, "/v1/thing", Echo(), plane=planes.SERVICE)
+
+    middleware = PlaneAuthenticationMiddleware(
+        registry,
+        authenticators={planes.JWT: ALL_AUTHENTICATORS[planes.JWT]},  # no MTLS
+        not_found_error=OrderNotFound,
+    )
+    with pytest.raises(UnregisteredRoute, match=r"SERVICE needs \['MTLS'\]"):
+        middleware.verify()
+
+
+def test_verify_passes_when_every_plane_is_covered():
+    registry = PlaneRegistry()
+    app = falcon.asgi.App()
+    mount(registry, app, "/v1/user", Echo(), plane=planes.USER)
+    mount(registry, app, "/v1/svc", Boom(), plane=planes.SERVICE)
+
+    PlaneAuthenticationMiddleware(
+        registry, authenticators=ALL_AUTHENTICATORS, not_found_error=OrderNotFound
+    ).verify()
+
+
+def test_verify_skips_public():
+    """No method authenticates on PUBLIC -- a declaration, not a gap."""
+    registry = PlaneRegistry()
+    app = falcon.asgi.App()
+    mount(registry, app, "/v1/terms", Echo(), plane=planes.PUBLIC, reason="pre-account")
+
+    PlaneAuthenticationMiddleware(
+        registry, authenticators={}, not_found_error=OrderNotFound
+    ).verify()
+
+
+def test_verify_names_every_plane_at_fault_with_an_example_route():
+    """A service with two mis-wired planes fixes both in one pass, not one restart each."""
+    registry = PlaneRegistry()
+    app = falcon.asgi.App()
+    mount(registry, app, "/v1/user", Echo(), plane=planes.USER)
+    mount(registry, app, "/v1/svc", Boom(), plane=planes.SERVICE)
+
+    middleware = PlaneAuthenticationMiddleware(
+        registry, authenticators={}, not_found_error=OrderNotFound
+    )
+    with pytest.raises(UnregisteredRoute) as excinfo:
+        middleware.verify()
+
+    message = str(excinfo.value)
+    assert "SERVICE" in message and "USER" in message
+    assert "/v1/svc" in message and "/v1/user" in message
+
+
+def test_verify_is_silent_on_an_empty_registry():
+    """Nothing mounted, nothing to cover. verify_app is what catches an app with unregistered
+    routes; this one only speaks about planes actually in use."""
+    PlaneAuthenticationMiddleware(
+        PlaneRegistry(), authenticators={}, not_found_error=OrderNotFound
+    ).verify()

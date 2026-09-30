@@ -136,6 +136,47 @@ class PlaneAuthenticationMiddleware:
         self._not_found_error = not_found_error
         self._on_plane_mismatch = on_plane_mismatch
 
+
+    def verify(self) -> None:
+        """Refuse to start if a mounted route's plane has no authenticator for its method.
+
+        The same check :meth:`_primary_for` makes, hoisted to boot. That one fires on the FIRST
+        REQUEST to a route, which is too late once this middleware is the only thing
+        authenticating: a mis-wired plane then looks healthy through deploy and smoke tests, and
+        is found by a caller. Worse, it is per-route lazy -- a rarely-called service-plane
+        endpoint can stay broken for a long time while everything else passes.
+
+        Call it once, after every route is mounted, beside
+        :func:`falcon_auth.adapters.routing.verify_app`.
+
+        PUBLIC is skipped: no method authenticates there, which is a declaration rather than a
+        gap (see :data:`falcon_auth.planes.METHODS_BY_PLANE`).
+
+        :raises UnregisteredRoute: naming every plane at fault, what it needs, and an example
+            route, so a service with two mis-wired planes fixes both in one pass.
+        """
+        gaps: dict[Plane, tuple[list[Method], list[str]]] = {}
+        for registration in self._registry.routes().values():
+            plane = registration.plane
+            if plane == PUBLIC:
+                continue
+            missing = sorted(methods_for(plane) - self._authenticators.keys())
+            if not missing:
+                continue
+            _, examples = gaps.setdefault(plane, (missing, []))
+            if len(examples) < 3:
+                examples.append(str(registration.endpoint))
+
+        if gaps:
+            detail = "; ".join(
+                f"{plane} needs {missing} (e.g. {', '.join(examples)})"
+                for plane, (missing, examples) in sorted(gaps.items())
+            )
+            raise UnregisteredRoute(
+                f"these planes have mounted routes but no authenticator was supplied for their "
+                f"method, so nothing could open them: {detail}"
+            )
+
     async def process_resource(
         self, req: Any, resp: Any, resource: object, params: dict[str, Any]
     ) -> None:
