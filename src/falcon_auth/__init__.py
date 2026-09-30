@@ -2,7 +2,7 @@
 
 Four parts, one question: **may this caller do this?**
 
-    eastwest/      is this peer service who its certificate says, and does it hold this scope
+    eastwest/      is this peer service who its certificate says, and does it hold this capability
     identity/      who is this user
     assurance/     how strongly, and how recently, did they authenticate
     entitlement/   what class of thing may this principal do
@@ -63,6 +63,7 @@ from .eastwest import (
     KIND_CALLBACK,
     KIND_SERVICE,
     AllowList,
+    MissingCapabilityError,
     MissingClientCertError,
     MissingScopeError,
     Principal,
@@ -114,6 +115,7 @@ from .entitlement import (
     UnregisteredGrant,
     check_flatness,
     check_grants_registered,
+    check_peers,
     normalise_registry,
     verify_policy,
     AuthenticatedUser,
@@ -147,6 +149,7 @@ __all__ = (
     "CapabilityEnforcer",
     "check_flatness",
     "check_grants_registered",
+    "check_peers",
     "check_session_elevated",
     "DEFAULT_DECODE_OPTIONS",
     "DEVICE_TRUST_ATTESTED",
@@ -167,6 +170,7 @@ __all__ = (
     "Method",
     "METHODS_BY_PLANE",
     "methods_for",
+    "MissingCapabilityError",
     "MissingClientCertError",
     "MissingScopeError",
     "normalise_registry",

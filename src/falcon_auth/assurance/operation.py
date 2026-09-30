@@ -244,7 +244,7 @@ AUTH_CODE_OPERATION_MISS = 8501
 class HttpOperationVerifier:
     """Default `OperationVerifier` over the host's mTLS session.
 
-    Requires **mTLS + `require_service_scope("step_up:verify")`** on this service's certificate.
+    Requires **mTLS + `require_service_capability("step_up:verify")`** on this service's certificate.
     A 403 therefore means OUR certificate is missing that scope -- a deployment fault, mapped to
     `AuthzUnavailable`, never to a user denial. Reporting it as one would read as "every user
     lost their step-up" during a bad rollout.

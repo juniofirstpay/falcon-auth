@@ -8,7 +8,7 @@ One question — **may this caller do this?** — answered in four parts that pr
 - **One plane vocabulary, one principal.** The split it replaces defined both twice, in two packages, with different spellings.
 - **Framework-agnostic cores.** Nothing outside `falcon_auth.adapters` imports Falcon — asserted by `tests/test_no_framework_leak.py`, not merely intended. A token string, two reference strings, a raw ASGI scope — each core is exercisable without a web framework.
 - **No connection, no configuration.** The package owns no connection and reads no settings: it issues the trust-context request, but on a session the host hands it, so certificates, base URL and lifecycle stay with the consumer. Every other value arrives as an argument.
-- **Fail-closed by default.** An empty allow-list denies every east-west route; an unmapped CN gets zero scopes; a route mounted on no plane is refused at boot; a capability with no registry row raises at decoration time, because absence must never mean "ungated".
+- **Fail-closed by default.** An empty allow-list denies every east-west route; an unmapped CN gets zero capabilities; a route mounted on no plane is refused at boot; a capability with no registry row raises at decoration time, because absence must never mean "ungated".
 
 ---
 
@@ -36,10 +36,10 @@ falcon-auth = { git = "...", ref = "<sha>", extras = ["uvicorn"] }
 
 | Part | Answers | Key symbols |
 |---|---|---|
-| `eastwest/` | is this peer service who its certificate says, and does it hold this scope | `Verifier` · `build_allow_list` · `peer_cn` |
+| `eastwest/` | is this peer service who its certificate says, and does it hold this capability | `Verifier` · `build_allow_list` · `peer_cn` |
 | `identity/` | who is this user | `JWKSStore` · `JWKSVerifier` |
 | `assurance/` | how strongly, how recently | `check_session_elevated` · `verify_operation` |
-| `entitlement/` | what class of thing may they do | `AuthServiceResolver` · `CapabilityEnforcer` · `verify_policy` |
+| `entitlement/` | what class of thing may they do — a user, or (C-056, proposed) a peer service | `AuthServiceResolver` · `CapabilityEnforcer` · `verify_policy` |
 
 Three modules sit above them, because they are the shared vocabulary the package exists to unify — none ever moves inside a part:
 
@@ -52,7 +52,7 @@ Three modules sit above them, because they are the shared vocabulary the package
 Two notes on that table, both corrections to an earlier sketch of it:
 
 - **`planes.py` holds the vocabulary, not the route machinery.** `PlaneRegistry`, `mount()` and `verify_app()` — declaring a route's plane and refusing a mismatch at startup (C-006) — need route and version knowledge and are framework-shaped, so they live in `adapters/routing.py` beside the middleware that reads the same map.
-- **There are two principal models, not one.** The east-west `Principal` (`cn` · `kind` · `source` · `scopes`) and the user-plane one (`user_ref` · `entitlements` · session and device trust) share **no field**. Merging them would produce a model where most attributes are `None` on any given request and a handler could not tell which kind it held, so they stay separate and are exported as `Principal` and `UserPrincipal`.
+- **There are two principal models, not one.** The east-west `Principal` (`cn` · `kind` · `source` · `capabilities`) and the user-plane one (`user_ref` · `entitlements` · session and device trust) share **no field**. Merging them would produce a model where most attributes are `None` on any given request and a handler could not tell which kind it held, so they stay separate and are exported as `Principal` and `UserPrincipal`.
 
 ---
 

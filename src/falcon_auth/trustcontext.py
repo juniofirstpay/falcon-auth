@@ -14,8 +14,8 @@ which turns a swapped session ref from "someone else's grants" into a denial.
 `aiohttp.ClientSession` -- the same one it uses for its other east-west calls. Certificates, base
 URL and lifecycle stay with the host, so this stays a library rather than a second HTTP stack.
 
-Requires **mTLS + `require_service_scope("trust:read")`** on the calling service's certificate. A
-`403` here therefore means *our own* certificate is missing that scope: a deployment fault, mapped
+Requires **mTLS + `require_service_capability("trust:read")`** on the calling service's certificate. A
+`403` here therefore means *our own* certificate is missing that capability: a deployment fault, mapped
 to `AuthzUnavailable`, never to a user denial.
 
 **Assurance is never cached.** C-038/RUL-072 rules the feed's two concerns apart: grants may be
