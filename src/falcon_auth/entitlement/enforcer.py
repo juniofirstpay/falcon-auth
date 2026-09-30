@@ -19,7 +19,7 @@ the question is asked ("does this key open...").
 import casbin
 from casbin.model import Model
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from ..principal import Principal
 
@@ -74,9 +74,26 @@ m = g(r.sub, p.sub) && r.obj == p.obj
 class CapabilityEnforcer:
     """Wraps casbin so callers ask one question and the first-match-wins loop lives in one place."""
 
-    def __init__(self, enforcer: casbin.Enforcer, registry: Registry) -> None:
+    def __init__(
+        self,
+        enforcer: casbin.Enforcer,
+        registry: Registry,
+        *,
+        peers: Collection[str] = (),
+    ) -> None:
         self._enforcer = enforcer
         self._registry = normalise_registry(registry)
+        self._peers = frozenset(peers)
+
+    @property
+    def peers(self) -> frozenset[str]:
+        """The logical peer names this policy declares (C-056, proposed).
+
+        Pass this to :func:`falcon_auth.eastwest.build_allow_list` as ``peers=`` so the config's
+        ``cn -> source`` bindings are checked against the code's declarations at boot. A plain
+        set of names, deliberately: east-west may not reach the enforcer itself.
+        """
+        return self._peers
 
     @property
     def registry(self) -> dict[str, list[str]]:
@@ -131,6 +148,21 @@ class CapabilityEnforcer:
         """:meth:`opened_by` for a principal -- the audit-line form."""
         return self.opened_by(principal.entitlements, capability)
 
+    def allows_peer(self, peer: str, capability: str) -> bool:
+        """Whether the SERVICE-plane peer ``peer`` holds ``capability`` (C-056, proposed).
+
+        The peer's name is the subject, and casbin walks its ``g`` rows to entitlements and the
+        shared ``p`` rows to the capability -- the same two hops as a grant.
+
+        An UNDECLARED peer is refused here before casbin is asked, and that is not redundancy.
+        The default role manager links ``name1 == name2``, so an undeclared name spelled like an
+        entitlement would open that entitlement's routes with no row at all -- the #1 A2 shape.
+        ``build_allow_list(peers=...)`` refuses such a config at boot; this is the net under it.
+        """
+        if peer not in self._peers:
+            return False
+        return bool(self._enforcer.enforce(peer, capability))
+
 
 def normalise_registry(registry: Registry) -> dict[str, list[str]]:
     """Read every value as an any-of list, and refuse a row that grants nothing.
@@ -159,6 +191,7 @@ def build_enforcer(
     registry: Registry,
     *,
     expansion: Mapping[str, list[str]] | None = None,
+    peers: Mapping[str, list[str]] | None = None,
 ) -> CapabilityEnforcer:
     """Build the gate from a service's capability registry. In-memory: no adapter, no policy file.
 
@@ -177,6 +210,15 @@ def build_enforcer(
         all, and the platform grant register is deliberately empty. With no rows, every
         ``enforce(x, capability)`` still resolves through the default role manager's
         ``name1 == name2`` link, so the gate answers exactly as it did before this layer existed.
+    :param peers: ``logical peer name -> the entitlements it holds`` -- the SERVICE plane's
+        holding (C-056, proposed), written as ``g`` rows in the SAME policy. A peer takes the
+        grant's position: two hops, the shared ``p`` rows, one lint. The name is the allow-list's
+        ``source``, which is the same in every environment; which certificate is which peer stays
+        config. ``None`` is allow-list mode: service-plane capabilities are read off the
+        allow-list and this policy never sees a peer.
+
+        Run :func:`falcon_auth.entitlement.verify_policy` with the same ``peers`` at startup --
+        it is what proves a peer name never collides with a grant or an entitlement.
     """
     normalised = normalise_registry(registry)
 
@@ -188,7 +230,10 @@ def build_enforcer(
     for grant, entitlements in (expansion or {}).items():
         for entitlement in entitlements:
             enforcer.add_grouping_policy(grant, entitlement)
-    return CapabilityEnforcer(enforcer, normalised)
+    for peer, entitlements in (peers or {}).items():
+        for entitlement in entitlements:
+            enforcer.add_grouping_policy(peer, entitlement)
+    return CapabilityEnforcer(enforcer, normalised, peers=(peers or {}).keys())
 
 
 # ---------------------------------------------------------------------------------------------
@@ -202,6 +247,8 @@ def build_enforcer(
 #   Flatness lint          falcon_auth.entitlement.flatness -- `g` is transitive and cannot
 #                          express flatness itself, so it is checked from outside
 #   Grant register         flatness.check_grants_registered -- an unlisted grant refuses boot
+#   Service-plane peers    build_enforcer(peers=...) -- C-056 (proposed), falcon-auth#8: a peer
+#                          takes the grant's position in the same policy
 #
 # Adoption was non-breaking: `Enforce(entitlement, capability)` keeps answering identically once
 # `g` rows exist, because casbin's default role manager counts `name1 == name2` as a link. The

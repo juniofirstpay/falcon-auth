@@ -19,11 +19,11 @@ Typical wiring::
     # that; a container that populates later, or a `configure()` that runs after routes import,
     # does not. Each factory CHECKS this and raises here rather than leaving a hook holding a
     # placeholder that 500s at request time.
-    from falcon_auth.adapters.hooks import require_service_scope
+    from falcon_auth.adapters.hooks import require_service_capability
     from app.services import verifier   # constructed at boot, BEFORE routes import
 
     class InternalRevocationsRoute:
-        @falcon.before(require_service_scope(verifier, "revocations.sessions:read"))
+        @falcon.before(require_service_capability(verifier, "revocations.sessions:read"))
         async def on_get_sessions(self, req, resp): ...
 
 The verifier stashes the authenticated :class:`~falcon_auth.eastwest.verifier.Principal`
@@ -33,6 +33,7 @@ called them can read it with :func:`principal_from_request`.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Awaitable, Callable
 
 import falcon
@@ -43,7 +44,9 @@ from ..assurance.stepup import check_session_elevated
 from ..entitlement.enforcer import CapabilityEnforcer
 from ..entitlement.resolver import Resolver
 from ..errors import CapabilityDenied, Unauthenticated
+from ..eastwest.errors import MissingCapabilityError
 from ..eastwest.verifier import Principal, Verifier
+from ..planes import SERVICE
 from ..trustcontext import TrustContextClient
 
 
@@ -65,7 +68,7 @@ HookFn = Callable[
 def _bind(collaborator: Any, method: str, *, param: str, factory: str) -> Any:
     """Check a hook's collaborator is usable NOW, because the hook binds it now.
 
-    ``@falcon.before(require_service_scope(verifier, "x:read"))`` calls the factory while the
+    ``@falcon.before(require_service_capability(verifier, "x:read"))`` calls the factory while the
     class body executes -- at module import. Whatever ``verifier`` is at that moment is what the
     closure keeps forever. A DI container that has not populated yet, a ``configure()`` that
     runs after routes import, a test that patches the module attribute afterwards: each leaves
@@ -88,16 +91,43 @@ def _bind(collaborator: Any, method: str, *, param: str, factory: str) -> Any:
     return collaborator
 
 
-def require_service_scope(verifier: Verifier, scope: str) -> HookFn:
-    """Return a Falcon ``before`` hook that gates a SERVICE route on ``scope``.
+def require_service_capability(
+    verifier: Verifier,
+    capability: str,
+    *,
+    enforcer: CapabilityEnforcer | None = None,
+) -> HookFn:
+    """Return a Falcon ``before`` hook that gates a SERVICE route on ``capability``.
 
     Fail-closed: no client cert →
     :class:`~falcon_auth.eastwest.errors.MissingClientCertError` (401), unknown CN
-    → :class:`~falcon_auth.eastwest.errors.UnknownCNError` (403), missing scope →
-    :class:`~falcon_auth.eastwest.errors.MissingScopeError` (403).
+    → :class:`~falcon_auth.eastwest.errors.UnknownCNError` (403), capability not held →
+    :class:`~falcon_auth.eastwest.errors.MissingCapabilityError` (403).
+
+    **Two modes, chosen by** ``enforcer``:
+
+        None       allow-list mode (C-018). The peer's capabilities are the allow-list row's.
+                   The demand is checked against nothing: ``"kyc:raed"`` mounts cleanly and no
+                   peer can ever open the route (falcon-auth#8).
+        given      policy mode (C-056, proposed). The peer's logical name -- the allow-list's
+                   ``source`` -- is the subject, and the enforcer walks its ``g`` rows. The
+                   demand is checked **at decoration time**, exactly as :func:`require` does on
+                   the user plane: a capability with no registry row raises here, at import,
+                   with a human watching.
+
+    A CALLBACK principal on a SERVICE route is refused in both modes. It carries no capabilities
+    by contract, and in policy mode its ``source`` is not a declared peer either -- the refusal
+    is stated here rather than left to that coincidence.
     """
 
-    _bind(verifier, "authenticate", param="verifier", factory="require_service_scope")
+    _bind(verifier, "authenticate", param="verifier", factory="require_service_capability")
+    if enforcer is not None:
+        _bind(enforcer, "allows_peer", param="enforcer", factory="require_service_capability")
+        if not enforcer.knows(capability):
+            raise ValueError(
+                f"capability {capability!r} is not in the capability registry -- add a row for "
+                f"it (a new route means a new row; absence must never mean ungated)"
+            )
 
     async def hook(
         req: falcon.asgi.Request,
@@ -108,10 +138,26 @@ def require_service_scope(verifier: Verifier, scope: str) -> HookFn:
         **_kw: Any,
     ) -> None:
         principal = verifier.authenticate(req.scope)
-        verifier.require_scope(principal, scope)
+        if enforcer is None:
+            verifier.require_capability(principal, capability)
+        elif principal.kind != SERVICE or not enforcer.allows_peer(principal.source, capability):
+            raise MissingCapabilityError(capability, code=verifier.codes.missing_capability)
         setattr(req.context, _PRINCIPAL_CTX_ATTR, principal)
 
     return hook
+
+
+def require_service_scope(verifier: Verifier, scope: str) -> HookFn:
+    """Deprecated: the pre-C-055 name of :func:`require_service_capability` in allow-list mode.
+
+    Warns once, where the route is decorated -- at import, in the deploy log -- not per request.
+    """
+    warnings.warn(
+        "require_service_scope is deprecated; use require_service_capability",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return require_service_capability(verifier, scope)
 
 
 def require_callback(verifier: Verifier) -> HookFn:
@@ -287,6 +333,7 @@ __all__ = (
     "require",
     "require_callback",
     "require_elevated",
+    "require_service_capability",
     "require_service_scope",
     "verify_operation_for",
 )

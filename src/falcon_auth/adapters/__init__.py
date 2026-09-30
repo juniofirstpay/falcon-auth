@@ -26,7 +26,7 @@ second, invisible configuration surface.
 
 Modules:
     hooks.py            require (entitlement) · require_elevated (assurance)
-                        require_service_scope · require_callback (east-west)
+                        require_service_capability · require_callback (east-west)
                         principal_from_request
     errors.py           register_error_handlers · render_svcplane_error
     authenticators.py   RemoteJWKSAuthenticator (boolean, for Authentication) ·
@@ -77,6 +77,7 @@ from .hooks import (
     require_callback,
     require_elevated,
     verify_operation_for,
+    require_service_capability,
     require_service_scope,
 )
 
@@ -106,6 +107,7 @@ __all__ = (
     "require_callback",
     "require_elevated",
     "verify_operation_for",
+    "require_service_capability",
     "require_service_scope",
     "UnregisteredRoute",
     "verify_app",

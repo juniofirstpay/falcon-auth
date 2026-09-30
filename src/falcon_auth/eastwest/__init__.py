@@ -1,7 +1,7 @@
 """Part 1 — east-west: peer services over mTLS.
 
 Authorizes a service-plane call by mapping the peer certificate's Common Name to an explicit
-set of `noun:verb` scopes. An unknown or unmapped CN gets **zero** scopes and is denied; an
+set of `noun:verb` capabilities. An unknown or unmapped CN gets **zero** capabilities and is denied; an
 empty allow-list rejects everything and never means "allow all".
 
 The CN is read from `scope["extensions"]["tls"]["peer_cert_der"]`, which `mtls` injects. This
@@ -19,6 +19,7 @@ during migration can be attributed to one or the other.
 from __future__ import annotations
 
 from .errors import (
+    MissingCapabilityError,
     MissingClientCertError,
     MissingScopeError,
     SvcPlaneError,
@@ -42,6 +43,7 @@ __all__ = (
     "AllowList",
     "KIND_CALLBACK",
     "KIND_SERVICE",
+    "MissingCapabilityError",
     "MissingClientCertError",
     "MissingScopeError",
     "PeerCertH11Protocol",

@@ -21,6 +21,10 @@ Both layers live in one policy set: `g, <grant>, <entitlement>` and `p, <entitle
 <capability>`, exactly two hops, flat — enforced by a build-time lint, because casbin chains a
 third silently.
 
+**The service plane can join the same policy** (C-056, proposed; falcon-auth#8). A peer
+service takes the grant's position -- `g, <peer>, <entitlement>` -- so both planes share one
+gate, one lint and one audit line. `build_enforcer(peers=...)` turns it on.
+
 **This is the only part that decides.** The others establish.
 
 The error vocabulary lives at the package root: `trustcontext` raises two of them, and
@@ -35,6 +39,7 @@ from .flatness import (
     UnregisteredGrant,
     check_flatness,
     check_grants_registered,
+    check_peers,
     verify_policy,
 )
 from .enforcer import (
@@ -58,6 +63,7 @@ __all__ = (
     "CapabilityEnforcer",
     "check_flatness",
     "check_grants_registered",
+    "check_peers",
     "FlatnessError",
     "GrantAllResolver",
     "MODEL_TEXT",
