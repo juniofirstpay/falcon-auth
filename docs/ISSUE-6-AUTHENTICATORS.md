@@ -34,6 +34,7 @@
 14. [Positions taken in the discussion](#14-positions-taken-in-the-discussion)
 15. [Open questions, and what was not verified](#15-open-questions-and-what-was-not-verified)
 16. [Glossary](#16-glossary)
+17. [Appendix: the HTTP root in its final shape](#17-appendix-the-http-root-in-its-final-shape)
 
 ---
 
@@ -386,9 +387,14 @@ P4's possible later ask — a stateless proof check for consumers — is `DPoPBi
 ### 8.5 Registration rules
 
 1. **Each authenticator belongs to exactly one plane.** Its method must be allowed on that plane.
-2. **Selectors must not overlap** across the middleware, or startup is refused. The three-outcome contract depends
-   on it: a header in another authenticator's scheme reads as *absent*, so two authenticators sharing a selector
-   would turn a valid credential of one kind into an *invalid* one of the other (401).
+2. **Selectors must not overlap across planes**, or startup is refused. Within one plane they may:
+   - **why within is safe:** routes pin one authenticator, so on any route only that one runs as the primary, and a
+     credential of another kind simply fails it (401). That's correct: the endpoint's credential is wrong.
+     `client_session` and `key_rotation` both read `Authorization: Bearer`, and the proof variants share the `DPoP`
+     header (§8.7).
+   - **why across matters:** the wrong-plane search (C-038 step 3) looks for a credential of *another* plane. There,
+     a shared selector would turn a valid credential of one plane into an *invalid* one of the other.
+   - (Amended 2026-10-01. The first draft said "across the middleware", which the instance table breaks twice.)
 3. **Each route names one authenticator** (`mount(..., credential="client_session")`). That is the default when its
    plane has only one. A plane with several authenticators and a route that names none is refused at startup — C-031's
    per-source rule (the Q86 reading) applied to routes.
@@ -415,6 +421,30 @@ rule:
 | `/mpin/forgot/*` | a pre-login set (client session) and a logged-in set (access token), e.g. `/mpin/forgot/*` and `/sessions/{ref}/mpin/forgot/*` |
 | `/clients/{ref}/reattest` | `…/reattest` (access token; software statement as payload) and a dead-state recovery endpoint (software statement as the credential) |
 | `/clients/{ref}/keys:bind` | `…/keys:bind` (client-key proof) and a recovery rotation (key-rotation token) |
+
+### 8.7 Instances: one per configured credential
+
+An authenticator **instance** is one configured credential: carrier + check + binding mode + options (single use,
+expired key allowed). Auth would configure nine:
+
+| Instance | Piece | Plane | Carrier | Binding | Routes |
+|---|---|---|---|---|---|
+| `access_token` | `JWTAuthenticator` | USER | `Authorization: DPoP` | `token` (the session picks web self-signed vs app client, ADR-091) | logged-in routes |
+| `access_token_rotation` | same, `allow_expired_key=True` | USER | `Authorization: DPoP` | `token` | authenticated reattest |
+| `client_session` | `ReferenceAuthenticator` | USER | `Authorization: Bearer` | `client` | otp, `token:create`, `users:register`, pre-login forgot-MPIN |
+| `key_rotation` | `ReferenceAuthenticator`, `single_use=True` | USER | `Authorization: Bearer` | `client`, expired key allowed | recovery key rotation |
+| `link` | `ReferenceAuthenticator` | USER | `Authorization: Link` | `self_signed` | `/links/*` |
+| `client_proof` | `ProofAuthenticator` | USER | `DPoP` header only | `client` | `/authentication`, `/token:refresh`, `threats:report` |
+| `client_proof_rotation` | same, `allow_expired_key=True` | USER | `DPoP` header only | `client` | `keys:bind` |
+| `software_statement` | JWT check, `single_use=True` | USER | `X-Software-Statement` | — | register, dead-state reattest |
+| `mtls` | `MTLSAuthenticator` | SERVICE | TLS certificate | — | service routes |
+
+- **The heavy parts are shared, not repeated.** One `DPoPVerifier` (nonce store, client lookup, `htu`
+  reconstruction) serves every binding; one token verifier serves every JWT check. An instance is thin configuration
+  over them.
+- **A variant such as `allow_expired_key` is its own instance, not a per-request flag.** A route pins one instance,
+  and that is where "this route accepts a proof from an expired key" belongs. Today auth writes it inside each
+  route's hook.
 
 ---
 
@@ -444,7 +474,7 @@ Two related C-006 items:
 | Step | What | Needs a ruling? | Effect on existing consumers |
 |---|---|---|---|
 | **1** | `Selector`; `JWTAuthenticator` / `ReferenceAuthenticator`; the three-outcome lookup; the declared binding with `PROVEN_AT_PERIMETER`; startup refusal on shared selectors. `jwt_authenticator` stays as an alias. | no | none — the alias keeps today's behaviour; a `DPoP` scheme without a declared binding warns for one release, then refuses |
-| **2** | Each authenticator on one plane; per-route pin in `mount`; wrong-plane lookup by authenticator; `verify()` covers pins | no | none while a plane has one authenticator |
+| **2** | Each authenticator on one plane; per-route pin in `mount`; wrong-plane lookup by authenticator; `verify()` covers pins; the middleware takes the same `exempt_paths` as `verify_app`, so probes pass (§17.1) | no | none while a plane has one authenticator; the probe exemption fixes a failure that any service mounting the middleware would hit today |
 | **3** | One request to the platform (§11) | **yes** | — |
 | **4** | `ProofAuthenticator`, `DPoPBinding`, `ONE_SHOT` on USER, the `identity_provider` fence | after step 3 | none — opt-in, auth only |
 | **5** | Auth adopts the middleware, splits the three routes, adds the attestation challenge, fixes the defects in §12 | after step 4 | — |
@@ -561,3 +591,299 @@ them before reporting them to auth. D1–D5 were read directly.
 | software statement (SSA) | the signed JWT auth mints at `/attest`, spent once at registration |
 | client session | the pre-login, multi-use reference token bound to a registered client key |
 | wrong-plane 404 | C-038 step 4: a valid credential for another plane answers as not-found, logged and flagged |
+
+---
+
+## 17. Appendix: the HTTP root in its final shape
+
+What auth's `app/http.py` looks like once steps 1–5 (§10) are done. **Illustrative:**
+- the names marked *new* are this design's, not shipped API;
+- the host functions (`lookup_client_session` and so on) are auth's own code, moved out of today's hooks;
+- paths assume auth's G5 move to `/v1` (C-039) and C-051's `svc` prefix;
+- the split route names are placeholders auth chooses.
+
+### 17.1 Auth (`ppi-backend-auth/app/http.py`)
+
+```python
+import falcon
+import falcon.asgi
+
+from falcon_auth.planes import PUBLIC, SERVICE, USER
+from falcon_auth.adapters import (
+    PlaneAuthenticationMiddleware, PlaneRegistry, mount, verify_app, register_error_handlers,
+    # new in steps 1 and 4
+    Selector, JWTAuthenticator, ReferenceAuthenticator, ProofAuthenticator, MTLSAuthenticator,
+)
+from falcon_auth.identity import DPoPVerifier                 # new in step 4
+from falcon_auth.eastwest import Verifier, build_allow_list
+from falcon_auth.entitlement import build_enforcer, verify_policy
+
+from app.config import app_ctx, settings
+from app.errors import NotFoundError
+from app.authn import (                                       # auth's own lookups, lifted out of today's hooks
+    load_access_session,        # claims -> session principal; exposes the bound thumbprint and the proof mode (ADR-091)
+    lookup_client_session,      # token -> snapshot | raises Unauthenticated (unknown/expired) | AuthzUnavailable
+    peek_key_rotation_token,    # token -> handle; checked here, CONSUMED in the handler's transaction
+    lookup_link,                # token -> link | raises Unauthenticated(E3901/E3909/E3910/E3911)
+    verify_software_statement,  # SSA JWT -> claims incl. jti; spent in the handler's transaction
+    resolve_client,             # DPoP thumbprint -> enabled Client; key age and #142 freshness live here
+    gate_pin,                   # the link gate's phone -> otp device pin (ADR-089)
+)
+from app.authz import SVC_REGISTRY, PEERS, GRANTS            # C-056 (proposed): peer -> entitlement rows, in code
+from app.routes import ...                                    # resource classes, one plane each (C-006)
+
+
+# ── shared verifiers: built once, used by every authenticator that needs them ─────────────
+
+dpop = DPoPVerifier(                                          # one nonce store, one client lookup, one htu
+    nonces=app_ctx.dpop_nonces,                               # atomic check-and-spend (fixes D4)
+    resolve_client=resolve_client,
+    trust_forwarded_headers=settings.http.trust_forwarded_headers,   # ADR-116; forward-auth reuses it (D7)
+)
+enforcer = build_enforcer(SVC_REGISTRY, peers=PEERS)          # C-056 (proposed)
+verify_policy(SVC_REGISTRY, grant_register=GRANTS, peers=PEERS)
+mtls = Verifier(build_allow_list(settings.svcplane.allow_list, peers=enforcer.peers))
+
+
+# ── the credentials auth accepts: one instance each (§8.7) ────────────────────────────────
+
+BEARER = Selector("Authorization", "Bearer")
+DPOP_SCHEME = Selector("Authorization", "DPoP")
+
+authenticators = {
+    # logged in: DPoP-bound access token; the session picks web self-signed vs app client (ADR-091)
+    "access_token": JWTAuthenticator(
+        app_ctx.token_verifier, DPOP_SCHEME, plane=USER,
+        principal=load_access_session, binding=dpop.token()),
+    "access_token_rotation": JWTAuthenticator(
+        app_ctx.token_verifier, DPOP_SCHEME, plane=USER,
+        principal=load_access_session, binding=dpop.token(allow_expired_key=True)),
+
+    # pre-login: reference tokens, each bound to the registered client key
+    "client_session": ReferenceAuthenticator(
+        lookup_client_session, BEARER, plane=USER,
+        binding=dpop.client()),                               # inside the authenticator: cannot be skipped (D1)
+    "key_rotation": ReferenceAuthenticator(
+        peek_key_rotation_token, BEARER, plane=USER,
+        binding=dpop.client(allow_expired_key=True), single_use=True),
+    "link": ReferenceAuthenticator(
+        lookup_link, Selector("Authorization", "Link"), plane=USER,
+        binding=dpop.self_signed(pin=gate_pin)),
+
+    # the client key alone
+    "client_proof": ProofAuthenticator(dpop.client(), plane=USER),
+    "client_proof_rotation": ProofAuthenticator(dpop.client(allow_expired_key=True), plane=USER),
+
+    # minted by auth, spent once
+    "software_statement": JWTAuthenticator(
+        verify_software_statement, Selector("X-Software-Statement", None), plane=USER,
+        binding=None, single_use=True),                       # not a DPoP scheme, so no binding is required
+
+    # service plane
+    "mtls": MTLSAuthenticator(mtls, plane=SERVICE),
+}
+
+
+# ── registry, middleware, app ─────────────────────────────────────────────────────────────
+
+PROBES = frozenset({"/_info"})                                # outside the plane system (RUL-033)
+
+registry = PlaneRegistry(
+    identity_provider=True,                                   # new: REFERENCE / PROOF / ONE_SHOT on USER (RUL-048)
+    allow_dev_routes=settings.testing.enabled,
+)
+authn = PlaneAuthenticationMiddleware(
+    registry,
+    authenticators=authenticators,
+    not_found_error=lambda: NotFoundError(),                  # the host's own not-found body (C-038 step 4)
+    on_plane_mismatch=app_ctx.security_events.plane_mismatch,
+    exempt_paths=PROBES,                                      # new: see the note below the listing
+)
+
+app = falcon.asgi.App(middleware=[ClientIPMiddleware(), LoggingMiddleware(), authn])
+register_error_handlers(app)
+# Gone: APIVersionPresenceMiddleware (C-039, G5) and AppVersionMiddleware (#186).
+
+app.add_route("/_info", HealthCheck())                        # a probe, deliberately unregistered
+
+
+# ── PUBLIC: each states its reason (C-006, RUL-035) ───────────────────────────────────────
+
+mount(registry, app, "/.well-known/jwks.json", jwks_route, plane=PUBLIC,
+      reason="RFC 8615 key discovery; unversioned pending a C-039 ruling")
+mount(registry, app, "/v1/links", gate_shell_route, plane=PUBLIC,
+      reason="the auth-link gate's HTML shell; its API calls carry the link token")
+mount(registry, app, "/v1/attest", attestation_route, suffix="attest", plane=PUBLIC,
+      reason="attestation evidence is judged, not a credential; PUBLIC until auth issues a server challenge (§6.4)")
+mount(registry, app, "/v1/test/integrity-token", testing_route, suffix="integrity_token",
+      plane=PUBLIC, reason="mock integrity-token minter", dev_only=True)
+
+
+# ── USER, minted by auth and spent once ───────────────────────────────────────────────────
+
+mount(registry, app, "/v1/clients:register", client_registration_route, suffix="register",
+      plane=USER, credential="software_statement")
+mount(registry, app, "/v1/clients/{client_ref}/reattest:recover", client_recovery_route, suffix="reattest",
+      plane=USER, credential="software_statement")                       # split from /reattest
+mount(registry, app, "/v1/clients/{client_ref}/keys:recover", client_recovery_route, suffix="keys",
+      plane=USER, credential="key_rotation")                            # split from keys:bind
+
+
+# ── USER, the client key alone ────────────────────────────────────────────────────────────
+
+mount(registry, app, "/v1/authentication", authentication_route,
+      plane=USER, credential="client_proof")
+mount(registry, app, "/v1/token:refresh", token_route, suffix="refresh",
+      plane=USER, credential="client_proof")                            # the refresh token is body payload
+mount(registry, app, "/v1/devices/threats:report", device_threats_route, suffix="report",
+      plane=USER, credential="client_proof")                            # #185
+mount(registry, app, "/v1/clients/{client_ref}/keys:bind", client_route, suffix="keys_bind",
+      plane=USER, credential="client_proof_rotation")
+
+
+# ── USER, the pre-login client session ────────────────────────────────────────────────────
+
+for path, suffix in [("/v1/authentication/otp:generate", "otp_generate"),
+                     ("/v1/authentication/otp:validate", "otp_validate")]:
+    mount(registry, app, path, authentication_route, suffix=suffix,
+          plane=USER, credential="client_session")
+mount(registry, app, "/v1/token:create", token_route, suffix="create",
+      plane=USER, credential="client_session")
+mount(registry, app, "/v1/users:register", user_registration_route, suffix="register",
+      plane=USER, credential="client_session")                          # UserRoute split (C-006)
+for path, suffix in [("/v1/mpin/forgot:begin", "begin"),
+                     ("/v1/mpin/forgot/{ref}:resend", "resend"),
+                     ("/v1/mpin/forgot/{ref}:verify", "verify"),
+                     ("/v1/mpin/forgot/{ref}:complete", "complete")]:
+    mount(registry, app, path, mpin_recovery_route, suffix=suffix,
+          plane=USER, credential="client_session")                      # pre-login half of the split
+
+
+# ── USER, the auth-link gate ──────────────────────────────────────────────────────────────
+
+for path, suffix in [("/v1/links/context", "context"),
+                     ("/v1/links/phone", "phone"),
+                     ("/v1/links/otp", "otp")]:
+    mount(registry, app, path, auth_link_gate_route, suffix=suffix,
+          plane=USER, credential="link")
+
+
+# ── USER, logged in ───────────────────────────────────────────────────────────────────────
+
+LOGGED_IN = [
+    ("/v1/sessions/{session_ref}", session_route, None),
+    ("/v1/sessions/{session_ref}:revoke", session_route, "revoke"),
+    ("/v1/sessions/{session_ref}/challenge:invoke", session_route, "challenge_invoke"),
+    ("/v1/sessions/{session_ref}/challenge:authenticate", session_route, "challenge_authenticate"),
+    ("/v1/sessions/{session_ref}/mpin/forgot:begin", session_mpin_recovery_route, "begin"),  # logged-in half
+    ("/v1/sessions/{session_ref}/mpin/forgot/{ref}:verify", session_mpin_recovery_route, "verify"),
+    ("/v1/sessions/{session_ref}/mpin/forgot/{ref}:complete", session_mpin_recovery_route, "complete"),
+    ("/v1/mfa:generate", mfa_route, "generate"),
+    ("/v1/mfa/{mfa_ref}:validate", mfa_route, "validate"),
+    ("/v1/mpin/reset:begin", mpin_reset_route, "begin"),
+    ("/v1/mpin/reset:complete", mpin_reset_route, "complete"),
+    ("/v1/users/{user_ref}/keys:bind", user_route, "keys_bind"),
+    ("/v1/users/{user_ref}/sessions:revoke", user_route, "sessions_revoke"),
+    ("/v1/devices/binding:begin", devices_route, "binding_begin"),
+    ("/v1/devices/binding/{ref}", devices_route, "binding"),
+    ("/v1/devices/binding/{ref}/otp:generate", devices_route, "binding_otp_generate"),
+    ("/v1/devices/binding/{ref}:end", devices_route, "binding_end"),
+    ("/v1/devices/binding/{ref}:cancel", devices_route, "binding_cancel"),
+    ("/v1/devices/binding:downgrade", devices_route, "binding_downgrade"),
+]
+for path, resource, suffix in LOGGED_IN:
+    mount(registry, app, path, resource, suffix=suffix, plane=USER, credential="access_token")
+mount(registry, app, "/v1/clients/{client_ref}/reattest", client_route, suffix="reattest",
+      plane=USER, credential="access_token_rotation")     # the software statement is body payload here
+
+
+# ── SERVICE: mTLS; each responder declares its capability (C-055/C-056) ───────────────────
+
+SVC = [
+    ("/v1/svc/forward-auth", svc_forward_auth_route, None),
+    ("/v1/svc/revocations/sessions", svc_revocations_route, "sessions"),
+    ("/v1/svc/revocations/user-epochs", svc_revocations_route, "user_epochs"),
+    ("/v1/svc/revocations/tokens", svc_revocations_route, "tokens"),                    # #214
+    ("/v1/svc/clients/rotations", svc_client_rotations_route, None),
+    ("/v1/svc/auth/links", svc_auth_links_route, "generate"),
+    ("/v1/svc/auth/links/{link_ref}:revoke", svc_auth_links_route, "revoke"),
+    ("/v1/svc/mfa/{mfa_ref}:authorize", svc_mfa_route, "authorize"),
+    ("/v1/svc/sessions/{session_ref}/trust-context", svc_session_route, "trust_context"),
+    ("/v1/svc/sessions/{session_ref}/operations/{operation_id}:verify", svc_session_route, "operation_verify"),
+    ("/v1/svc/onboarding:complete", svc_onboarding_route, "complete"),
+    ("/v1/svc/users/{user_ref}", svc_user_route, None),                                 # UserRoute split
+]
+for path, resource, suffix in SVC:
+    mount(registry, app, path, resource, suffix=suffix, plane=SERVICE)   # one authenticator: the pin defaults
+
+
+# ── refuse to start on any wiring gap ─────────────────────────────────────────────────────
+
+verify_app(app, registry, exempt_paths=PROBES)    # every route registered (C-006)
+authn.verify()                                    # every route's pinned authenticator exists and sits on its plane;
+                                                  # no two planes share a selector (§8.5 rules 1-3, 6)
+```
+
+**What moved where.**
+
+| Today | Final shape |
+|---|---|
+| a hook on every responder (`validate_authenticated`, `validate_dpop`, `validate_client_session`, `validate_auth_link_gate`, `validate_recovery_carrier`) | one `credential=` per mount; the middleware runs it |
+| DPoP checked by whichever hook happens to run | checked once, inside the authenticator, in the mode the credential selects |
+| runtime branches inside `/reattest`, `keys:bind`, `/mpin/forgot/*` | separate endpoints, each pinned to one credential |
+| `require_service_scope` on service responders, checked against nothing | `require_service_capability(mtls, "trust:read", enforcer=enforcer)` on the responder, checked when the decorator runs (C-056) |
+| `/internal/...` paths, unversioned | `/v1/svc/...` (C-039, C-051) |
+| classes named by URL prefix (`InternalSessionRoute`) | classes named by plane (`svc_session_route`), and `UserRoute` split (C-006) |
+| `X-API-Version` and app-version middleware | gone (C-039, #186) |
+
+**What the handlers still do.** The middleware authenticates, and the responders keep only what is theirs:
+
+```python
+class ClientRegistrationRoute:
+    async def on_post_register(self, req, resp):
+        ssa = req.context.auth_principal                   # checked, not spent
+        async with self.db.transaction() as tx:
+            await ssa.consume(tx)                          # spent with the change, after idempotency (C-030)
+            client = await self.clients.register(tx, ssa.claims)
+        ...
+
+class SvcSessionRoute:
+    @falcon.before(require_service_capability(mtls, "trust:read", enforcer=enforcer))
+    async def on_get_trust_context(self, req, resp, session_ref): ...
+```
+
+**New requirement found while writing this listing.** The middleware has no probe exemption today: an unregistered
+`/_info` reaches `process_resource`, has no registry row, and raises `UnregisteredRoute`. `verify_app` already exempts
+probe paths. The middleware needs the same `exempt_paths`, or every probe fails the day the middleware is mounted.
+
+### 17.2 A consuming service (for example persona or orders)
+
+Nothing about the identity provider leaks into a consumer. Its USER plane stays JWT only, and the DPoP binding is
+declared as proven upstream (P4):
+
+```python
+from falcon_auth.adapters import (
+    PlaneAuthenticationMiddleware, PlaneRegistry, mount, verify_app,
+    Selector, JWTAuthenticator, MTLSAuthenticator, PROVEN_AT_PERIMETER,   # new in step 1
+)
+
+authenticators = {
+    "access_token": JWTAuthenticator(
+        jwks_verifier, Selector("Authorization", "DPoP"), plane=USER,
+        binding=PROVEN_AT_PERIMETER),          # the gateway's forward-auth checked the proof (RUL-048, P4)
+    "mtls": MTLSAuthenticator(mtls, plane=SERVICE),
+}
+registry = PlaneRegistry()                     # identity_provider=False: REFERENCE / PROOF refused on USER
+authn = PlaneAuthenticationMiddleware(registry, authenticators=authenticators,
+                                      not_found_error=OrderNotFound, exempt_paths=PROBES)
+app = falcon.asgi.App(middleware=[authn])
+
+mount(registry, app, "/v1/orders/{order_id}", orders_route, plane=USER)       # one USER authenticator: pin defaults
+mount(registry, app, "/v1/svc/orders/{order_id}", svc_orders_route, plane=SERVICE)
+
+verify_app(app, registry, exempt_paths=PROBES)
+authn.verify()
+```
+
+Capability checks stay on the responders, as today: `require(enforcer, resolver, "orders:read")` on USER, and
+`require_service_capability(mtls, "orders:read", enforcer=enforcer)` on SERVICE.
