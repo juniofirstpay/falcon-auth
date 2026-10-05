@@ -41,6 +41,7 @@ __all__ = (
     "PLANE_BY_METHOD",
     "PUBLIC",
     "Plane",
+    "REFERENCE_TOKEN",
     "SERVICE",
     "USER",
     "methods_for",
@@ -70,9 +71,16 @@ PLANES: frozenset[Plane] = frozenset({USER, SERVICE, CALLBACK, PUBLIC})
 
 # ── methods ───────────────────────────────────────────────────────────────────────────────
 
-#: The closed set of authentication methods. Closed is the whole point: an api-key is not here,
-#: and that absence is load-bearing rather than an oversight.
-Method = Literal["JWT", "MTLS", "HMAC", "ONE_SHOT_TOKEN"]
+#: The authentication methods this package can name. An api-key is not here, and that absence is
+#: load-bearing rather than an oversight.
+#:
+#: ``REFERENCE_TOKEN`` -- an opaque token checked by a store lookup and reusable until it expires --
+#: is NAMED here but sits under no plane in :data:`METHODS_BY_PLANE`, because C-038 does not list
+#: it. A host may still attach one to a plane (falcon-auth#6: the identity provider's pre-login
+#: client session and its link gate); ``PlaneAuthenticationMiddleware.verify(profile="strict")``
+#: refuses that and ``profile="permissive"`` reports it. Naming it is what lets the report say
+#: what the deviation is.
+Method = Literal["JWT", "MTLS", "HMAC", "ONE_SHOT_TOKEN", "REFERENCE_TOKEN"]
 
 JWT: Method = "JWT"
 MTLS: Method = "MTLS"
@@ -80,11 +88,19 @@ HMAC: Method = "HMAC"
 #: Spelled out rather than ``TOKEN`` so it can never be read as the JWT bearer. It is a
 #: single-use credential this service minted, verified and consumed (C-030).
 ONE_SHOT_TOKEN: Method = "ONE_SHOT_TOKEN"
+#: Opaque, looked up, reusable until expiry. Named by how it is CHECKED, not "bearer" (how it is
+#: used) or "opaque" (what it looks like) -- a one-shot token is opaque too (falcon-auth#6).
+REFERENCE_TOKEN: Method = "REFERENCE_TOKEN"
 
 
 # ── the map ───────────────────────────────────────────────────────────────────────────────
 
-#: ``plane -> the methods that authenticate on it``.
+#: ``plane -> the methods that authenticate on it`` -- the RECOMMENDED map, which C-038 rules.
+#:
+#: It is what ``PlaneAuthenticationMiddleware.verify(profile="strict")`` holds a service to, and
+#: what a plane's authenticators default to when a route pins none. A host may attach other
+#: methods to a plane (falcon-auth#6); the strict profile refuses that at boot, the permissive one
+#: reports it once. The map itself is not configuration and does not change per host.
 #:
 #: USER and SERVICE are PINNED to exactly one method each -- that is what "one authentication
 #: method per plane" means and the set is not permitted to grow. CALLBACK is the one plane that
