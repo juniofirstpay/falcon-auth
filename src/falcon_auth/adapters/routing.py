@@ -40,6 +40,7 @@ path prefix to decide one.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,6 +108,10 @@ class Registration:
     #: Required for PUBLIC, ``None`` elsewhere. Kept so the registry can be printed as the
     #: answer to "what is reachable without a credential, and why".
     reason: str | None = None
+    #: The named authenticators this endpoint accepts (falcon-auth#6), or ``None`` for "every
+    #: authenticator on its plane" -- which is exactly one wherever a plane carries one, the
+    #: common case. Pinning ONE is the recommendation; ``verify(profile="strict")`` holds it.
+    credentials: tuple[str, ...] | None = None
 
 
 class PlaneRegistry:
@@ -148,10 +153,22 @@ class PlaneRegistry:
         resource_type: type,
         *,
         reason: str | None = None,
+        credentials: tuple[str, ...] | None = None,
     ) -> Registration:
         """Record one endpoint's plane, or raise explaining which rule it broke."""
         if plane not in PLANES:
             raise PlaneConflict(f"unknown plane {plane!r}; expected one of {sorted(PLANES)}")
+
+        if plane == PUBLIC and credentials:
+            raise PlaneConflict(
+                f"{method.upper()} {path} is PUBLIC but names credentials {list(credentials)}. "
+                f"A PUBLIC route demands none and inspects none -- one or the other"
+            )
+        if credentials is not None and not credentials:
+            raise PlaneConflict(
+                f"{method.upper()} {path} pins an empty credential list, which no caller could "
+                f"satisfy; omit credential= to accept the plane's authenticators"
+            )
 
         if plane == PUBLIC and not (reason or "").strip():
             raise PlaneConflict(
@@ -198,6 +215,7 @@ class PlaneRegistry:
             resource_type=resource_type,
             version=version,
             reason=reason,
+            credentials=credentials,
         )
         self._by_endpoint[key] = registration
         self._by_class.setdefault(resource_type, registration)
@@ -273,6 +291,7 @@ def mount(
     suffix: str | None = None,
     reason: str | None = None,
     dev_only: bool = False,
+    credential: str | Sequence[str] | None = None,
 ) -> bool:
     """``app.add_route(...)`` and record the plane of every method the resource answers.
 
@@ -287,7 +306,14 @@ def mount(
     :param dev_only: a route that must not exist in production (RUL-035). It is skipped
         entirely -- not mounted and not registered -- rather than mounted behind a runtime
         check, because a route that exists is a route that can be reached.
+    :param credential: the name of the authenticator this route accepts -- or several, in the
+        order they are tried (falcon-auth#6). Omitted, the route accepts every authenticator on
+        its plane: the right default wherever a plane carries one. One per route is the
+        recommendation: a route that accepts two lets the caller choose the weaker (C-031).
     """
+    credentials = (credential,) if isinstance(credential, str) else (
+        tuple(credential) if credential is not None else None
+    )
     if dev_only and not registry.allow_dev_routes:
         return False
 
@@ -301,7 +327,9 @@ def mount(
     # Register BEFORE adding the route. A conflict must leave the app without the offending
     # route rather than with a mounted route the registry disowns.
     for method in methods:
-        registry.register(plane, method, path, type(resource), reason=reason)
+        registry.register(
+            plane, method, path, type(resource), reason=reason, credentials=credentials
+        )
 
     if suffix is not None:
         app.add_route(path, resource, suffix=suffix)

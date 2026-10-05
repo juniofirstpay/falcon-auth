@@ -30,8 +30,10 @@ Modules:
                         principal_from_request
     errors.py           register_error_handlers · render_svcplane_error
     authenticators.py   RemoteJWKSAuthenticator (boolean, for Authentication) ·
-                        jwt_authenticator / mtls_authenticator (tri-state, for the
-                        plane middleware) -- two contracts, see the module
+                        JWTAuthenticator / ReferenceAuthenticator / MTLSAuthenticator /
+                        CustomAuthenticator (tri-state, for the plane middleware) --
+                        each a configured credential: Selector + check + Binding;
+                        jwt_authenticator / mtls_authenticator build them
     hooks.py            ... plus verify_operation_for -- per-operation step-up, called
                         INLINE from a responder rather than as a hook, because the
                         idempotency reservation it must follow is itself inline
@@ -45,17 +47,28 @@ Modules:
 from __future__ import annotations
 
 from .authenticators import (
+    PROVEN_AT_PERIMETER,
+    Binding,
+    CustomAuthenticator,
+    JWTAuthenticator,
+    MTLSAuthenticator,
+    PlaneAuthenticator,
+    ReferenceAuthenticator,
     RemoteJWKSAuthenticator,
+    Selector,
     jwt_authenticator,
     mtls_authenticator,
 )
 from .errors import register_error_handlers, render_svcplane_error
 from .middleware import (
+    AUTH_CREDENTIAL_ATTR,
     AUTH_METHOD_ATTR,
     AUTH_PRINCIPAL_ATTR,
     PLANE_ATTR,
     Authenticator,
+    ConventionDeviation,
     PlaneAuthenticationMiddleware,
+    Profile,
 )
 from .routing import (
     DEFAULT_PROBE_PATHS,
@@ -82,6 +95,7 @@ from .hooks import (
 )
 
 __all__ = (
+    "AUTH_CREDENTIAL_ATTR",
     "AUTH_METHOD_ATTR",
     "AUTH_PRINCIPAL_ATTR",
     "Authenticator",
@@ -111,4 +125,15 @@ __all__ = (
     "require_service_scope",
     "UnregisteredRoute",
     "verify_app",
+    # falcon-auth#6, steps 1-2
+    "Binding",
+    "ConventionDeviation",
+    "CustomAuthenticator",
+    "JWTAuthenticator",
+    "MTLSAuthenticator",
+    "PlaneAuthenticator",
+    "Profile",
+    "PROVEN_AT_PERIMETER",
+    "ReferenceAuthenticator",
+    "Selector",
 )

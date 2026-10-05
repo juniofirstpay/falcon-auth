@@ -85,16 +85,17 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 306 tests, mypy clean.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 396 tests.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
 | `eastwest/` | verifier · errors · mtls |
 | `identity/` | JWKS store, verifier, Falcon authenticator |
+| `adapters/authenticators.py` | configured credentials — `Selector`, `JWTAuthenticator` · `ReferenceAuthenticator` · `MTLSAuthenticator` · `CustomAuthenticator`, and a declared binding (`PROVEN_AT_PERIMETER`) for `DPoP` tokens (#6) |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks |
-| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, one method per plane, and the wrong-plane 404 |
+| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, credentials pinned per route, and the wrong-plane 404; one method per plane held by `verify(profile="strict")` (#6) |
 
 **C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
 
