@@ -49,7 +49,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -73,7 +73,19 @@ __all__ = (
 )
 
 
-class OperationChallengeMiss(AuthzError):
+class _OperationRefusal(AuthzError):
+    """C-030: every miss, replay or mismatch answers with ONE identical code, and no extras.
+
+    ⚠ ``PLAT0109`` ("verify it's you") is PROVISIONAL: the register has no consumer-facing row for
+    a challenge that cannot be spent, and the client's recovery -- step up again -- is
+    ``PLAT0109``'s. Raised for a ruling on platform-conventions#19. The three keep distinct
+    CLASSES, so the service's own log tells them apart; the wire must not.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0109"
+
+
+class OperationChallengeMiss(_OperationRefusal):
     """The challenge is not spendable: unknown, not passed, expired, or already consumed.
 
     Auth answers all of those with one uniform code, deliberately -- a consumed operation
@@ -86,7 +98,7 @@ class OperationChallengeMiss(AuthzError):
     """
 
 
-class OperationPurposeMismatch(AuthzError):
+class OperationPurposeMismatch(_OperationRefusal):
     """A real challenge, passed and unspent -- raised for a different purpose.
 
     Note what has already happened by the time this raises: auth **consumed** the challenge,
@@ -98,7 +110,7 @@ class OperationPurposeMismatch(AuthzError):
     """
 
 
-class OperationBodyMismatch(AuthzError):
+class OperationBodyMismatch(_OperationRefusal):
     """The request body is not the one the step-up was raised against.
 
     The challenge authorized a specific act. A body that hashes differently is a different act,

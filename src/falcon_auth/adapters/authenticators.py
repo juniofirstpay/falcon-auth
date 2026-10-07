@@ -36,7 +36,7 @@ from typing import Any, ClassVar, Optional, Protocol
 import falcon.asgi
 import structlog
 
-from ..errors import AuthzUnavailable, Unauthenticated
+from ..errors import AuthzUnavailable, TokenExpired, Unauthenticated
 from ..eastwest.verifier import Verifier, peer_cn
 from ..identity.jwks import InvalidToken, JWKSVerifier
 from ..planes import (
@@ -52,6 +52,9 @@ from ..planes import (
 )
 
 logger = structlog.get_logger("falcon_auth.adapters")
+
+#: The `InvalidToken.reason` JWKSVerifier gives an expired token (PyJWT's exception name).
+_EXPIRED = "ExpiredSignatureError"
 
 
 class RemoteJWKSAuthenticator:
@@ -384,6 +387,9 @@ class JWTAuthenticator(PlaneAuthenticator):
             claims = await self._verify(token)
         except InvalidToken as e:
             await logger.awarning("jwt rejected", reason=e.reason)
+            if e.reason == _EXPIRED:
+                # PLAT0108: the client refreshes, rather than signing in again (RUL-072).
+                raise TokenExpired(f"invalid token: {e.reason}") from e
             raise Unauthenticated(f"invalid token: {e.reason}") from e
         except (Unauthenticated, AuthzUnavailable):
             raise

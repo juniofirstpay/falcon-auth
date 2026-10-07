@@ -75,12 +75,14 @@ from .eastwest import (
     build_uvicorn_ssl_kwargs,
     peer_cn,
 )
+from .wire import PLAT_CODES, PlatformError, envelope
 from .errors import (
     AuthzError,
     AuthzUnavailable,
     CapabilityDenied,
     SessionMiss,
     StepUpRequired,
+    TokenExpired,
     Unauthenticated,
 )
 from .trustcontext import (
@@ -199,6 +201,10 @@ __all__ = (
     "SESSION_TRUST_ELEVATED",
     "SessionMiss",
     "StepUpRequired",
+    "TokenExpired",
+    "PLAT_CODES",
+    "PlatformError",
+    "envelope",
     "SvcPlaneError",
     "SvcPlaneErrorCodes",
     "TrustContext",

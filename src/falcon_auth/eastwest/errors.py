@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
+
+from ..wire import PlatformError
 
 
 _DEFAULT_MISSING_CERT_CODE = 9000
@@ -115,8 +117,13 @@ class SvcPlaneErrorCodes:
 # property the README states and ``tests/test_no_framework_leak.py`` now enforces.
 
 
-class SvcPlaneError(Exception):
+class SvcPlaneError(PlatformError):
     """Base for the three fail-closed east-west errors.
+
+    Two renderings. :meth:`json` is the pre-C-001 shape (``{code:int, title, description}``),
+    kept for :func:`~falcon_auth.adapters.errors.register_error_handlers`, which is deprecated.
+    Through :func:`~falcon_auth.adapters.errors.register_platform_error_handlers` each subclass
+    renders as its PLAT row (C-001, C-008) -- the numeric :attr:`code` is then not used.
 
     Subclasses set :attr:`title`, :attr:`http_status`, and :attr:`description`
     at class level (hardened by the package). Only :attr:`code` and
@@ -131,6 +138,10 @@ class SvcPlaneError(Exception):
         super().__init__()
         self.code = code
         self.extras = extras
+
+    def trace(self) -> str:
+        detail = f" {self.extras}" if self.extras else ""
+        return f"{self.description}{detail}"
 
     def json(self) -> dict[str, Any]:
         """Return the wire-format body.
@@ -157,6 +168,7 @@ class MissingClientCertError(SvcPlaneError):
     the peer connected without presenting a cert under ``CERT_OPTIONAL``.
     """
 
+    plat_code: ClassVar[str] = "PLAT0103"
     title = "MissingClientCertError"
     http_status = "401 Unauthorized"
     description = "east-west plane requires a client certificate (mTLS)"
@@ -171,6 +183,7 @@ class UnknownCNError(SvcPlaneError):
     ``extras.cn`` carries the offending CN for logging / triage.
     """
 
+    plat_code: ClassVar[str] = "PLAT0104"
     title = "UnknownCNError"
     http_status = "403 Forbidden"
     description = "certificate CN is not in the allow-list"
@@ -190,6 +203,7 @@ class MissingCapabilityError(SvcPlaneError):
 
     # The wire title is the pre-C-055 class name, deliberately. Changing it is a wire change and
     # waits for C-055's ratification and falcon-auth#1 A8; the class name is not on the wire.
+    plat_code: ClassVar[str] = "PLAT0102"
     title = "MissingScopeError"
     http_status = "403 Forbidden"
     # Description template — instance-level `description` is set at raise-time
@@ -217,6 +231,10 @@ class MissingCapabilityError(SvcPlaneError):
     def scope(self) -> str:
         """Deprecated: the pre-C-055 name of :attr:`capability`."""
         return self.capability
+
+    def wire_extras(self) -> dict[str, Any]:
+        # C-055: `extras.capability`, on both planes. The legacy json() keeps `scope`.
+        return {"capability": self.capability}
 
 
 #: The pre-C-055 name. The SAME class, not a subclass, so an ``except MissingScopeError`` in a
