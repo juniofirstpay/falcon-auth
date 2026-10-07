@@ -44,7 +44,7 @@ class ProfileResource:
         # RESERVED: the only branch that may spend a challenge
         await verify_operation_for(
             req, verifier, refs,
-            expected_purpose="order_create", body_hash=quote_digest,
+            expected_purpose="order_create", bind_body=True,     # needs RawBodyBuffer
         )
         ...perform the write...
 ```
@@ -72,13 +72,13 @@ client mints X-Operation-ID, runs step-up under it     challenge -> PASSED
       │     IN_PROGRESS  ──►  202                          NOTHING SPENT
       │     RESERVED     ──►  a genuine first execution, continue
       │
-      └─ verify_operation_for(req, verifier, refs, body_hash=...)  adapters/hooks.py
+      └─ verify_operation_for(req, verifier, refs, bind_body=True) adapters/hooks.py
          │
          ├─ operation_id = req.get_header("X-Operation-ID")
          │     absent  ──►  Unauthenticated, and nothing is spent
          │
-         ├─ body_hash(await req.get_media())        your canonicalizer
-         │     get_media(), NEVER stream.read() -- see below
+         ├─ raw_body_hash(raw_body(req.scope))      C-058: SHA-256 over the exact bytes
+         │     the bytes RawBodyBuffer kept below Falcon -- see below
          │
          └─ verify_operation(...)                   assurance/operation.py
             │
@@ -123,14 +123,11 @@ a route using per-operation step-up has idempotency by construction. A hook here
 "usually wrong"; it is wrong wherever the mechanism is used at all. So the package does not
 ship one, and a test asserts it does not — because a hook is the obvious thing to reach for.
 
-Reuse the fingerprint the reservation already computes rather than writing a second
-canonicalizer. Orders does exactly this, and says why: two definitions of "canonical" over one
-body will drift, and the day they do, a body-bound challenge silently stops matching.
+### 2. The body is hashed as raw bytes, kept below Falcon
 
-### 2. The body is read with `get_media()`, never `stream.read()`
-
-Body binding is caller-side, so the helper has to see the body. Reading the **stream** leaves
-whichever of the two runs second with nothing:
+C-058 (`v28`) defines the binding over **the exact bytes received**, before any decode. A parsed
+body cannot give them back, and reading Falcon's **stream** leaves whichever of the two runs
+second with nothing:
 
 ```
 hook saw     : b'{"amount": 500}'
@@ -138,9 +135,11 @@ handler saw  : b''
 handler media: 400 "Could not parse an empty JSON body"
 ```
 
-`get_media()` caches the **deserialized** media, so the helper and the rest of the responder
-share one object — whichever calls it first. There is a test asserting the handler still sees
-its body afterwards.
+So the bytes are kept one layer down. `RawBodyBuffer` wraps the ASGI app, drains the body once,
+keeps it in the ASGI scope, and replays it to Falcon **unchanged** (C-058 §1). The handler's
+`get_media()` works as before, and `verify_operation_for(..., bind_body=True)` hashes the kept
+bytes. Without the wrapper, `bind_body=True` raises a wiring error rather than compare against
+anything else. There are tests for both.
 
 ### 3. Purpose is the gate, not a tier
 
@@ -182,19 +181,21 @@ retry forever into a challenge that can never become spendable again.
 When the user stepped up, auth recorded a **fingerprint of the body they agreed to**. On
 `:verify` it hands that fingerprint back — and does **not** compare it for you.
 
-Why not? Auth does not know your body format. These are the same request to you:
+The hash is over **bytes, not meaning** (C-058, superseding C-030's JCS clause). These are the
+same object, but different bytes, so different hashes:
 
 ```json
 {"amount": 500, "to": "x"}      {"to": "x", "amount": 500}
 ```
 
-…but different bytes, so different fingerprints. Only your service knows which fields matter and
-how to write them down predictably. **Canonicalizing** is turning a body into one fixed string so
-the same logical request always hashes the same way. That is a schema question, and the schema is
-yours.
+That is deliberate. The client hashes the final bytes it sends, as its last act (C-058 §3), and
+nothing between it and the service may alter them (§1) -- so no canonicalizer is needed at either
+end, and none can drift. `request_body_hash` = base64url, unpadded, SHA-256 over the body:
+`falcon_auth.raw_body_hash(bytes)`.
 
-So you supply `body_hash: (parsed media) -> str`. The package calls it, compares, and refuses a
-mismatch.
+Pass `bind_body=True` with the app wrapped in `RawBodyBuffer`. The package hashes, compares, and
+refuses a mismatch. (`body_hash=`, a hasher over the parsed media, still works with a deprecation
+warning; it cannot match a client following C-058.)
 
 **Why it matters:** the user steps up to transfer ₹500. Without the comparison, that same
 challenge authorizes a body saying ₹50,000.
@@ -234,7 +235,7 @@ And note it is **not a retry**. That distinction is the whole reason it has its 
 
 ## What the package does not supply
 
-- **The canonicalizer.** Yours — it is a schema question.
+- **The `RawBodyBuffer` wiring.** Yours -- wrap the ASGI app where the server is handed it.
 - **The idempotency store.** Yours, and its reservation must resolve before this is called.
 - **The FE step-up flow.** The client passes the factor through auth's own
   `challenge:invoke` → `:authenticate`; the service that consumes the challenge never runs it.
