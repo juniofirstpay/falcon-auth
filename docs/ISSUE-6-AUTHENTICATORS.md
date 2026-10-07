@@ -1,5 +1,19 @@
 # falcon-auth#6: the identity provider's credentials, and how authenticators should be built
 
+> ⛔ **Superseded 2026-10-07 — kept for the record.** The platform ruled differently from parts of
+> this design:
+>
+> - **C-060** (`v30`, RUL-152) gives **five planes**, with a `Client` plane for the identity
+>   provider's pre-user routes. It names methods by how they're checked; **a route declares
+>   exactly one credential**, and the wrong-plane search counts only I/O-free credentials.
+> - **C-061**: a broken property refuses start. C-060's reason calls a permissive profile a
+>   loophole.
+> - **Auth won't use falcon-auth's constructs** (AUTH-ADR-139), so step 4 and §17.1 are moot, and
+>   falcon-auth is a pinned artifact for **resource services only** (RUL-157).
+> - The wrong-plane answer is **`404 PLAT0006`** (RUL-158).
+>
+> What falcon-auth owes is tracked in #11.
+
 > **Status:** a recommendation. Nothing in it has been built or posted. Prepared 2026-10-01 for the
 > falcon-auth#6 discussion.
 >

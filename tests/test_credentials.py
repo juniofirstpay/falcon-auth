@@ -3,9 +3,9 @@
 Step 1 -- an authenticator is a configured credential: a Selector (where it is read), a check
 (signature, lookup, certificate), a Binding (proof of possession), and whether it is single-use.
 
-Step 2 -- a route accepts the authenticators it pins, or every one on its plane. One per plane
-and one per route are RECOMMENDATIONS, held by verify(profile="strict") and reported by
-verify(profile="permissive"); the rules that keep the middleware's answers correct are not.
+Step 2, as C-060 (`v30`) rules it -- a route declares EXACTLY ONE credential; the wrong-plane
+search counts only I/O-free credentials and never the forwarding hop; the wrong-plane answer is
+the route not-found (PLAT0006, RUL-158); CLIENT is the identity provider's and refused here.
 
 Middleware tests drive real Falcon requests, as tests/test_adapters_middleware.py does.
 """
@@ -228,19 +228,19 @@ def _lookup(result=None, raises=None, delay=0.0):
 
 
 def test_a_known_token_is_the_principal():
-    auth = ReferenceAuthenticator(_lookup({"client": "c-1"}), BEARER)
+    auth = ReferenceAuthenticator(_lookup({"client": "c-1"}), BEARER, plane="CLIENT")
     assert run(auth(_Req({"Authorization": "Bearer t"}))) == {"client": "c-1"}
     assert auth.method == planes.REFERENCE_TOKEN
 
 
 def test_a_presented_token_the_store_does_not_know_is_401_not_absent():
     with pytest.raises(Unauthenticated):
-        run(ReferenceAuthenticator(_lookup(None), BEARER)(_Req({"Authorization": "Bearer t"})))
+        run(ReferenceAuthenticator(_lookup(None), BEARER, plane="CLIENT")(_Req({"Authorization": "Bearer t"})))
 
 
 def test_the_lookup_never_runs_without_a_token_of_its_kind():
     lookup = _lookup({"x": 1})
-    assert run(ReferenceAuthenticator(lookup, BEARER)(_Req({"Authorization": "Link t"}))) is None
+    assert run(ReferenceAuthenticator(lookup, BEARER, plane="CLIENT")(_Req({"Authorization": "Link t"}))) is None
     assert lookup.calls == []
 
 
@@ -254,19 +254,19 @@ def test_the_lookup_never_runs_without_a_token_of_its_kind():
 )
 def test_the_lookup_has_three_outcomes(raises, expected):
     with pytest.raises(expected):
-        run(ReferenceAuthenticator(_lookup(raises=raises), BEARER)(
+        run(ReferenceAuthenticator(_lookup(raises=raises), BEARER, plane="CLIENT")(
             _Req({"Authorization": "Bearer t"})))
 
 
 def test_a_slow_lookup_is_503():
-    auth = ReferenceAuthenticator(_lookup({"x": 1}, delay=0.2), BEARER, timeout=0.01)
+    auth = ReferenceAuthenticator(_lookup({"x": 1}, delay=0.2), BEARER, plane="CLIENT", timeout=0.01)
     with pytest.raises(AuthzUnavailable, match="timed out"):
         run(auth(_Req({"Authorization": "Bearer t"})))
 
 
 def test_a_single_use_reference_is_a_one_shot_token_and_is_not_spent_here():
     lookup = _lookup({"rotation": "r-1"})
-    auth = ReferenceAuthenticator(lookup, BEARER, single_use=True)
+    auth = ReferenceAuthenticator(lookup, BEARER, plane="CALLBACK", single_use=True)
     req = _Req({"Authorization": "Bearer t"})
     run(auth(req)), run(auth(req))
     assert auth.method == planes.ONE_SHOT_TOKEN
@@ -278,6 +278,18 @@ def test_an_unknown_plane_is_refused():
         ReferenceAuthenticator(_lookup(), BEARER, plane="ADMIN")  # type: ignore[arg-type]
 
 
+def test_a_credential_has_one_plane():
+    with pytest.raises(ValueError, match="ONE"):
+        ReferenceAuthenticator(_lookup(), BEARER, plane=["CLIENT", "CALLBACK"])  # type: ignore[arg-type]
+
+
+def test_a_reference_authenticator_names_its_plane():
+    """No default: C-060 puts a reusable reference token on CLIENT only -- there is no default
+    that would be right for a resource service."""
+    with pytest.raises(TypeError):
+        ReferenceAuthenticator(_lookup(), BEARER)  # type: ignore[call-arg]
+
+
 def test_mtls_defaults_to_the_service_plane():
     assert MTLSAuthenticator(object()).planes == {planes.SERVICE}  # type: ignore[arg-type]
 
@@ -285,144 +297,197 @@ def test_mtls_defaults_to_the_service_plane():
 # ─── step 2: the middleware ──────────────────────────────────────────────────
 
 
-class NotFound(Exception):
-    pass
-
-
-async def _render_404(req, resp, ex, params):
-    resp.status, resp.media = falcon.HTTP_404, {"code": "NOT_FOUND"}
-
-
-async def _render_401(req, resp, ex, params):
-    resp.status, resp.media = falcon.HTTP_401, {"code": "UNAUTHENTICATED"}
-
-
 class Echo:
     async def on_get(self, req, resp):
         resp.media = {
             "credential": getattr(req.context, AUTH_CREDENTIAL_ATTR, None),
             "method": getattr(req.context, AUTH_METHOD_ATTR, None),
-            "principal": getattr(req.context, AUTH_PRINCIPAL_ATTR, None),
+            "principal": _plain(getattr(req.context, AUTH_PRINCIPAL_ATTR, None)),
         }
 
 
-def fake(name, selector, *, plane, method, header=None):
-    """A configured credential that reads `selector`: 'good' passes, 'bad' is invalid."""
+def _plain(principal):
+    return getattr(principal, "source", principal)
+
+
+async def _render_route_not_found(req, resp, ex, params):
+    """The host's router miss: PLAT0006 (RUL-158). The wrong-plane answer must be exactly this."""
+    resp.status, resp.media = falcon.HTTP_404, {"code": "PLAT0006", "message": "route_not_found"}
+
+
+async def _render_401(req, resp, ex, params):
+    resp.status, resp.media = falcon.HTTP_401, {"code": "PLAT0101"}
+
+
+class _Principal:
+    def __init__(self, source):
+        self.source = source
+
+
+def fake(name, selector, *, plane, method, principal=None):
+    """A configured credential that reads `selector`: 'bad' is invalid, anything else valid."""
 
     async def attempt(req):
-        token = selector.extract(req) if header is None else req.get_header(header)
+        token = selector.extract(req)
         if token is None:
             return None
         if token == "bad":
             raise Unauthenticated(f"invalid {name}")
-        return f"{name}-principal"
+        return principal(token) if principal else f"{name}-principal"
 
     return CustomAuthenticator(attempt, plane=plane, method=method, selector=selector)
 
 
 CERT = Selector("X-Client-Cert")
 
-#: The identity provider's USER plane, in miniature.
-IDP = {
+#: A resource service: USER by JWT, SERVICE by mTLS, two CALLBACK sources pinned per route.
+RESOURCE = {
     "access_token": fake("access_token", DPOP, plane=planes.USER, method=planes.JWT),
-    "client_session": fake("client_session", BEARER, plane=planes.USER,
-                           method=planes.REFERENCE_TOKEN),
-    "mtls": fake("mtls", CERT, plane=planes.SERVICE, method=planes.MTLS),
+    "mtls": fake("mtls", CERT, plane=planes.SERVICE, method=planes.MTLS,
+                 principal=_Principal),
+    "rail_hmac": fake("rail_hmac", Selector("X-Signature"), plane=planes.CALLBACK,
+                      method=planes.HMAC),
+    "psp_token": fake("psp_token", Selector("X-Callback-Token"), plane=planes.CALLBACK,
+                      method=planes.ONE_SHOT_TOKEN),
 }
 
 
-def build(routes, *, authenticators=IDP, flagged=None, exempt_paths=None, bare=()):
+def build(routes, *, authenticators=RESOURCE, flagged=None, bare=(), **kwargs):
     """routes: [(path, plane, credential)]; bare: paths added with app.add_route only."""
     registry = PlaneRegistry()
-    kwargs = {} if exempt_paths is None else {"exempt_paths": exempt_paths}
     mw = PlaneAuthenticationMiddleware(
         registry,
         authenticators=authenticators,
-        not_found_error=NotFound,
         on_plane_mismatch=(lambda *a: flagged.append(a)) if flagged is not None else None,
         **kwargs,
     )
     app = falcon.asgi.App(middleware=[mw])
-    app.add_error_handler(NotFound, _render_404)
+    app.add_error_handler(falcon.HTTPRouteNotFound, _render_route_not_found)
     app.add_error_handler(Unauthenticated, _render_401)
+    per_plane = {}  # C-006: one resource class serves exactly one plane
     for path, plane, credential in routes:
-        mount(registry, app, path, Echo(), plane=plane, credential=credential,
+        cls = per_plane.setdefault(plane, type(f"Echo{plane}", (Echo,), {}))
+        mount(registry, app, path, cls(), plane=plane, credential=credential,
               reason="test" if plane == planes.PUBLIC else None)
     for path in bare:
         app.add_route(path, Echo())
     return falcon.testing.TestClient(app), mw
 
 
-def test_a_pinned_route_accepts_its_credential_and_stamps_its_name():
-    client, mw = build([("/v1/token:create", planes.USER, "client_session")])
-    mw.verify(profile="permissive")
-    r = client.simulate_get("/v1/token:create", headers={"Authorization": "Bearer good"})
-    assert r.status_code == 200
-    assert r.json == {"credential": "client_session", "method": "REFERENCE_TOKEN",
-                      "principal": "client_session-principal"}
+ROUTES = [
+    ("/v1/orders", planes.USER, None),
+    ("/v1/svc/orders", planes.SERVICE, None),
+    ("/v1/callbacks/rail", planes.CALLBACK, "rail_hmac"),
+    ("/v1/callbacks/psp", planes.CALLBACK, "psp_token"),
+]
 
 
-def test_another_credential_on_the_same_plane_is_401_not_404_and_not_flagged():
-    """An access token sent to a client-session route: the endpoint's credential is absent, and
-    nothing about the plane is revealed -- the holder is on the right plane, at the wrong door."""
+def test_each_route_opens_with_its_one_credential_and_stamps_its_name():
+    client, mw = build(ROUTES)
+    mw.verify()
+    r = client.simulate_get("/v1/callbacks/psp", headers={"X-Callback-Token": "t"})
+    assert r.json == {"credential": "psp_token", "method": "ONE_SHOT_TOKEN",
+                      "principal": "psp_token-principal"}
+    assert client.simulate_get("/v1/orders", headers={"Authorization": "DPoP t"}).json[
+        "credential"] == "access_token"
+
+
+def test_the_original_method_keyed_shape_still_works():
+    """persona's PR #109 shape: one authenticator per plane, no pins."""
+    legacy = {planes.JWT: RESOURCE["access_token"], planes.MTLS: RESOURCE["mtls"]}
+    client, mw = build(ROUTES[:2], authenticators=legacy)
+    mw.verify()
+    assert client.simulate_get("/v1/orders", headers={"Authorization": "DPoP t"}).json[
+        "credential"] == "JWT"
+
+
+# ─── step 4: the wrong-plane answer ──────────────────────────────────────────
+
+
+def test_a_valid_credential_of_another_plane_is_404_plat0006_identical_to_a_router_miss():
+    """RUL-158: the route not-found, byte-identical to a path that does not exist at all."""
     flagged = []
-    client, _ = build([("/v1/token:create", planes.USER, "client_session")], flagged=flagged)
-    r = client.simulate_get("/v1/token:create", headers={"Authorization": "DPoP good"})
+    client, _ = build(ROUTES, flagged=flagged)
+    wrong_plane = client.simulate_get("/v1/orders", headers={"X-Client-Cert": "payments"})
+    router_miss = client.simulate_get("/v1/no-such-route")
+    assert wrong_plane.status_code == router_miss.status_code == 404
+    assert wrong_plane.content == router_miss.content
+    assert wrong_plane.json["code"] == "PLAT0006"
+    assert flagged == [("/v1/orders", planes.USER, planes.MTLS)]
+
+
+@pytest.mark.parametrize("header", ["X-Signature", "X-Callback-Token"])
+def test_a_credential_needing_a_lookup_never_makes_a_404(header):
+    """C-060 §6: only I/O-free credentials enter the search. A valid callback credential sent to a
+    USER route is ABSENT there -- 401, not 404 -- so junk cannot turn the 404 into database load."""
+    flagged = []
+    client, _ = build(ROUTES, flagged=flagged)
+    r = client.simulate_get("/v1/orders", headers={header: "t"})
     assert r.status_code == 401 and flagged == []
 
 
-def test_a_credential_from_another_plane_is_still_the_404_and_flagged():
-    flagged = []
-    client, _ = build([("/v1/token:create", planes.USER, "client_session")], flagged=flagged)
-    r = client.simulate_get("/v1/token:create", headers={"X-Client-Cert": "good"})
-    assert r.status_code == 404 and r.json == {"code": "NOT_FOUND"}
-    assert flagged == [("/v1/token:create", planes.USER, planes.MTLS)]
-
-
-def test_a_route_may_accept_two_credentials_with_disjoint_carriers():
-    """auth's forgot-MPIN today: an access token OR a pre-login client session."""
-    client, mw = build([("/v1/mpin/forgot:begin", planes.USER, ["access_token", "client_session"])])
-    mw.verify(profile="permissive")
-    by_token = client.simulate_get("/v1/mpin/forgot:begin", headers={"Authorization": "DPoP good"})
-    by_session = client.simulate_get("/v1/mpin/forgot:begin",
-                                     headers={"Authorization": "Bearer good"})
-    assert (by_token.json["credential"], by_session.json["credential"]) == (
-        "access_token", "client_session")
-
-
-def test_an_invalid_accepted_credential_does_not_fall_through_to_the_next():
-    client, _ = build([("/v1/x", planes.USER, ["access_token", "client_session"])])
-    r = client.simulate_get("/v1/x", headers={"Authorization": "DPoP bad"})
+def test_a_client_key_proof_alone_on_a_user_route_is_401():
+    """C-060's own conformance case: a USER request missing its token, with only a proof."""
+    client, _ = build(ROUTES)
+    r = client.simulate_get("/v1/orders", headers={"DPoP": "eyJ.proof"})
     assert r.status_code == 401
 
 
-def test_an_unpinned_route_accepts_every_authenticator_on_its_plane():
-    client, _ = build([("/v1/svc/x", planes.SERVICE, None)])
-    assert client.simulate_get("/v1/svc/x", headers={"X-Client-Cert": "good"}).json[
+def test_the_forwarding_hops_certificate_is_never_a_caller_credential():
+    """C-060 §6. The gateway forwards user requests over its own mTLS leaf and is also an
+    allow-listed peer for routes it calls on its own behalf. A user request with no token must be
+    401, not a 404 caused by the hop's certificate."""
+    gateway = MTLSAuthenticator(_AllowList({"gateway.internal": "gateway"}),
+                                transport_peers={"gateway"})
+    client, _ = build(ROUTES[:2], authenticators={
+        "access_token": RESOURCE["access_token"], "mtls": gateway})
+    r = client.simulate_get("/v1/orders", extras=_cert("gateway.internal"))
+    assert r.status_code == 401
+
+
+def test_the_forwarding_hop_is_still_an_ordinary_caller_on_a_service_route():
+    gateway = MTLSAuthenticator(_AllowList({"gateway.internal": "gateway"}),
+                                transport_peers={"gateway"})
+    client, _ = build(ROUTES[:2], authenticators={
+        "access_token": RESOURCE["access_token"], "mtls": gateway})
+    assert client.simulate_get("/v1/svc/orders", extras=_cert("gateway.internal")).json[
         "credential"] == "mtls"
 
 
-def test_the_original_method_keyed_shape_still_works_unchanged():
-    """Every consumer written before #6 -- persona's PR #109 among them."""
-    legacy = {
-        planes.JWT: fake("jwt", DPOP, plane=planes.USER, method=planes.JWT),
-        planes.MTLS: fake("mtls", CERT, plane=planes.SERVICE, method=planes.MTLS),
-    }
-    client, mw = build([("/v1/orders", planes.USER, None)], authenticators=legacy)
-    mw.verify()
-    r = client.simulate_get("/v1/orders", headers={"Authorization": "DPoP good"})
-    assert r.json["credential"] == "JWT" and r.json["method"] == "JWT"
-    assert client.simulate_get("/v1/orders", headers={"X-Client-Cert": "good"}).status_code == 404
+def test_another_credential_of_the_same_plane_is_401_and_not_flagged():
+    flagged = []
+    client, _ = build(ROUTES, flagged=flagged)
+    r = client.simulate_get("/v1/callbacks/rail", headers={"X-Callback-Token": "t"})
+    assert r.status_code == 401 and flagged == []
 
 
-# ─── step 2: what is always refused ──────────────────────────────────────────
+def test_an_invalid_credential_is_401_and_does_not_search():
+    client, _ = build(ROUTES)
+    r = client.simulate_get("/v1/orders",
+                            headers={"Authorization": "DPoP bad", "X-Client-Cert": "payments"})
+    assert r.status_code == 401
 
 
-def test_pinning_an_unknown_credential_is_refused_at_boot_and_at_request():
+# ─── one credential per route (C-060 §3) ─────────────────────────────────────
+
+
+def test_credential_takes_one_name_never_a_list():
+    with pytest.raises(PlaneConflict, match="exactly one"):
+        build([("/v1/callbacks/x", planes.CALLBACK, ["rail_hmac", "psp_token"])])
+
+
+def test_an_unpinned_route_on_a_plane_with_two_authenticators_is_refused():
+    """It would accept 'any of' them -- refused at boot, and at request as the net under it."""
+    client, mw = build([("/v1/callbacks/x", planes.CALLBACK, None)])
+    with pytest.raises(UnregisteredRoute, match="exactly one"):
+        mw.verify()
+    assert client.simulate_get("/v1/callbacks/x", headers={"X-Signature": "t"}).status_code == 500
+
+
+def test_pinning_an_unknown_credential_is_refused():
     client, mw = build([("/v1/x", planes.USER, "nonexistent")])
     with pytest.raises(UnregisteredRoute, match="nonexistent"):
         mw.verify()
-    assert client.simulate_get("/v1/x", headers={"Authorization": "DPoP good"}).status_code == 500
 
 
 def test_pinning_a_credential_from_another_plane_is_refused():
@@ -436,30 +501,34 @@ def test_a_public_route_naming_a_credential_is_refused_at_mount():
         build([("/v1/open", planes.PUBLIC, "access_token")])
 
 
-def test_two_accepted_credentials_on_one_carrier_are_refused():
-    both_bearer = dict(IDP, key_rotation=fake("key_rotation", BEARER, plane=planes.USER,
-                                              method=planes.ONE_SHOT_TOKEN))
-    _, mw = build([("/v1/x", planes.USER, ["client_session", "key_rotation"])],
-                  authenticators=both_bearer)
-    with pytest.raises(PlaneConflict, match="same carrier"):
-        mw.verify(profile="permissive")
+# ─── C-060's table, at construction ──────────────────────────────────────────
 
 
-def test_sharing_a_carrier_within_one_plane_is_fine_when_routes_pin():
-    """client_session and key_rotation both read `Authorization: Bearer` -- each route pins one."""
-    both_bearer = dict(IDP, key_rotation=fake("key_rotation", BEARER, plane=planes.USER,
-                                              method=planes.ONE_SHOT_TOKEN))
-    client, mw = build([("/v1/a", planes.USER, "client_session"),
-                        ("/v1/b", planes.USER, "key_rotation")], authenticators=both_bearer)
-    mw.verify(profile="permissive")
-    r = client.simulate_get("/v1/b", headers={"Authorization": "Bearer good"})
-    assert r.json["credential"] == "key_rotation"
+def test_a_client_route_is_refused():
+    """C-060 §2: CLIENT is mounted by the identity provider only, which does not use this package
+    (RUL-157)."""
+    with pytest.raises(PlaneConflict, match="identity provider"):
+        build([("/v1/client/token", planes.CLIENT, None)])
 
 
-def test_sharing_a_carrier_across_planes_is_refused_at_construction():
+def test_a_client_authenticator_is_refused():
+    session = ReferenceAuthenticator(_lookup({"x": 1}), BEARER, plane=planes.CLIENT)
+    with pytest.raises(ConventionDeviation, match="identity provider"):
+        build([], authenticators={"client_session": session})
+
+
+def test_a_method_off_c060s_table_is_refused():
+    """A reference token on USER -- what falcon-auth#6 once proposed, and C-060 ruled against."""
+    on_user = CustomAuthenticator(_lookup(), plane=planes.USER, method=planes.REFERENCE_TOKEN,
+                                  selector=BEARER)
+    with pytest.raises(ConventionDeviation, match="C-060"):
+        build([], authenticators={"session": on_user})
+
+
+def test_sharing_a_carrier_across_planes_is_refused():
     clash = {
-        "user_bearer": fake("user_bearer", BEARER, plane=planes.USER, method=planes.JWT),
-        "svc_bearer": fake("svc_bearer", BEARER, plane=planes.SERVICE, method=planes.MTLS),
+        "user": fake("user", BEARER, plane=planes.USER, method=planes.JWT),
+        "svc": fake("svc", BEARER, plane=planes.SERVICE, method=planes.MTLS),
     }
     with pytest.raises(PlaneConflict, match="different planes"):
         build([], authenticators=clash)
@@ -467,7 +536,7 @@ def test_sharing_a_carrier_across_planes_is_refused_at_construction():
 
 def test_mixing_the_two_shapes_is_refused():
     with pytest.raises(TypeError, match="one shape"):
-        build([], authenticators={planes.JWT: IDP["access_token"], "mtls": IDP["mtls"]})
+        build([], authenticators={planes.JWT: RESOURCE["access_token"], "mtls": RESOURCE["mtls"]})
 
 
 def test_a_named_authenticator_must_declare_its_plane():
@@ -478,56 +547,11 @@ def test_a_named_authenticator_must_declare_its_plane():
         build([], authenticators={"bare": bare})
 
 
-# ─── step 2: what the profile decides ────────────────────────────────────────
-
-
-def test_strict_refuses_a_method_c038_does_not_put_on_the_plane():
-    _, mw = build([("/v1/token:create", planes.USER, "client_session")])
-    with pytest.raises(ConventionDeviation, match="REFERENCE_TOKEN"):
-        mw.verify()
-
-
-def test_permissive_starts_and_logs_each_deviation_once():
-    _, mw = build([("/v1/token:create", planes.USER, "client_session")])
-    with capture_logs() as logs:
-        mw.verify(profile="permissive")
-    found = [e for e in logs if e["event"] == "plane_convention_deviation"]
-    assert len(found) == 1 and "client_session (REFERENCE_TOKEN) on USER" in found[0]["findings"]
-
-
-def test_strict_refuses_an_authenticator_on_two_planes():
-    two = {"either": fake("either", DPOP, plane=[planes.USER, planes.CALLBACK],
-                          method=planes.JWT)}
-    _, mw = build([("/v1/x", planes.USER, None)], authenticators=two)
-    with pytest.raises(ConventionDeviation, match="more than one plane"):
-        mw.verify()
-
-
-def test_strict_refuses_a_route_accepting_two_of_the_same_method():
-    twice = {
-        "a": fake("a", DPOP, plane=planes.USER, method=planes.JWT),
-        "b": fake("b", Selector("X-Other", "Token"), plane=planes.USER, method=planes.JWT),
-    }
-    _, mw = build([("/v1/x", planes.USER, None)], authenticators=twice)
-    with pytest.raises(ConventionDeviation, match="same method"):
-        mw.verify()
-
-
-def test_callbacks_two_methods_are_c038s_own_allowance_and_pass_strict():
-    callback = {
-        planes.HMAC: fake("hmac", Selector("X-Signature"), plane=planes.CALLBACK,
-                          method=planes.HMAC),
-        planes.ONE_SHOT_TOKEN: fake("oneshot", Selector("X-One-Shot"), plane=planes.CALLBACK,
-                                    method=planes.ONE_SHOT_TOKEN),
-    }
-    _, mw = build([("/v1/callbacks/x", planes.CALLBACK, None)], authenticators=callback)
-    mw.verify()
-
-
-def test_an_unknown_profile_is_refused():
-    _, mw = build([])
-    with pytest.raises(ValueError):
-        mw.verify(profile="lenient")  # type: ignore[arg-type]
+def test_there_is_no_permissive_profile():
+    """C-060 calls a permissive profile a loophole; C-061 §1: a broken property refuses start."""
+    _, mw = build(ROUTES)
+    with pytest.raises(TypeError):
+        mw.verify(profile="permissive")  # type: ignore[call-arg]
 
 
 # ─── the probe exemption ─────────────────────────────────────────────────────
@@ -552,3 +576,41 @@ def test_a_registered_route_is_never_exempt():
     """Naming a USER route in exempt_paths cannot make it public."""
     client, _ = build([("/health", planes.USER, "access_token")], exempt_paths={"/health"})
     assert client.simulate_get("/health").status_code == 401
+
+
+# ─── helpers for real certificates ───────────────────────────────────────────
+
+
+class _AllowList:
+    """A Verifier stand-in over a {cn: source} map, reading the CN the way eastwest does."""
+
+    def __init__(self, sources):
+        self._sources = sources
+
+    def authenticate(self, scope):
+        from falcon_auth.eastwest.verifier import peer_cn
+        from falcon_auth import UnknownCNError
+
+        cn = peer_cn(scope)
+        if cn not in self._sources:
+            raise UnknownCNError(cn=cn)
+        return _Principal(self._sources[cn])
+
+
+def _cert(cn):
+    import datetime as dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = dt.datetime.now(dt.timezone.utc)
+    der = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+           .public_key(key.public_key()).serial_number(x509.random_serial_number())
+           .not_valid_before(now - dt.timedelta(minutes=1))
+           .not_valid_after(now + dt.timedelta(hours=1))
+           .sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+    return {"extensions": {"tls": {"peer_cert_der": der}}}

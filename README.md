@@ -45,7 +45,7 @@ Three modules sit above them, because they are the shared vocabulary the package
 
 | Module | Holds |
 |---|---|
-| `planes.py` | `Plane` · `Method` · `METHODS_BY_PLANE` · `PLANE_BY_METHOD` — the four planes and the one method each authenticates |
+| `planes.py` | `Plane` · `Method` · `METHODS_BY_PLANE` · `PLANE_BY_METHOD` — the five planes (C-060), the methods each holds, and the resource-service inverse |
 | `principal.py` | the user-plane principal (`UserPrincipal` at the package root) |
 | `trustcontext.py` | **one** call to auth, read by both assurance and entitlement |
 
@@ -85,7 +85,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 396 tests.** East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 404 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
@@ -95,7 +95,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks |
-| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, credentials pinned per route, and the wrong-plane 404; one method per plane held by `verify(profile="strict")` (#6) |
+| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, exactly one credential per route, `CLIENT` refused, and the wrong-plane `404 PLAT0006` over I/O-free credentials only (C-060, #11) |
 
 **C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
 

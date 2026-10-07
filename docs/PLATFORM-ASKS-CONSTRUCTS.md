@@ -1,5 +1,23 @@
 # What falcon-auth built and proposes behind the platform asks
 
+> ✅ **Outcome, 2026-10-07:** all nine asks are closed.
+>
+> | Ruling | What it settled |
+> |---|---|
+> | C-055/C-056 (`v26`) | ratified |
+> | RUL-134 | grants wire, no `grant_epoch` |
+> | RUL-135 | probes and `/.well-known` stay unversioned |
+> | C-058 (`v28`) | the body hash is **raw bytes**, not JCS |
+> | C-060/C-061 (`v30`) | five planes; one credential per route; I/O-free search; conformance cases |
+> | C-062 (`v31`) | client identity; attestation |
+> | RUL-157/158/159 | falcon-auth pinned for resource services at `46b4012`; wrong-plane answer `PLAT0006` |
+>
+> §2–§5 below describe the constructs as they stood at the pin. The rebuild for #11 changes:
+> - removes the permissive profile;
+> - removes `credential=[...]` lists;
+> - refuses `CLIENT`;
+> - narrows the wrong-plane search.
+
 > **Purpose:** context for the platform authority while ruling on juniofirstpay/platform-conventions
 > #6–#14. Those issues state the **asks**. This document states the **constructs** behind them:
 > what is already built (`main`, after PR #10), what is proposed, and which of them carry a rule

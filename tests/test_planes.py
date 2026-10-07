@@ -1,6 +1,6 @@
 """Tests for the plane vocabulary.
 
-These read as restatements of C-038 on purpose. The map is the one place in the package where
+These read as restatements of C-038 and C-060 (`v30`) on purpose. The map is the one place in the package where
 a single wrong entry silently changes which credential opens which endpoint, and it has no
 behaviour of its own to catch it -- so the convention is asserted directly.
 """
@@ -28,8 +28,31 @@ from falcon_auth.planes import (
 # ── the closed sets ─────────────────────────────────────────────────────────
 
 
-def test_there_are_exactly_four_planes():
-    assert PLANES == {"USER", "SERVICE", "CALLBACK", "PUBLIC"}
+def test_there_are_exactly_five_planes():
+    """C-060 §1. CLIENT is the identity provider's pre-user plane."""
+    assert PLANES == {"USER", "CLIENT", "SERVICE", "CALLBACK", "PUBLIC"}
+
+
+def test_the_map_is_c060s_table():
+    assert dict(METHODS_BY_PLANE) == {
+        "USER": {"JWT"},
+        "CLIENT": {"DPOP_PROOF", "REFERENCE_TOKEN", "ONE_SHOT_TOKEN"},
+        "SERVICE": {"MTLS"},
+        "CALLBACK": {"HMAC", "ONE_SHOT_TOKEN"},
+        "PUBLIC": set(),
+    }
+
+
+def test_a_resource_service_never_mounts_client():
+    """C-060 §2: CLIENT is mounted by the identity provider only, and the identity provider does
+    not use this package (RUL-157)."""
+    assert planes.RESOURCE_SERVICE_PLANES == PLANES - {"CLIENT"}
+
+
+def test_the_wrong_plane_search_verifies_only_io_free_credentials():
+    """C-060 §6: the TLS peer and a JWT's signature, expiry and audience -- nothing that needs a
+    lookup."""
+    assert planes.SEARCHABLE_METHODS == {"JWT", "MTLS"}
 
 
 def test_every_plane_has_a_row_in_the_map():
@@ -89,8 +112,12 @@ def test_a_method_under_two_planes_refuses_to_build():
         planes._invert({USER: frozenset({JWT}), PUBLIC: frozenset({JWT})})
 
 
-def test_the_inverse_covers_every_method_in_the_map():
-    assert set(planes.PLANE_BY_METHOD) == {m for ms in METHODS_BY_PLANE.values() for m in ms}
+def test_the_inverse_covers_every_resource_service_method():
+    """Over all five planes ONE_SHOT_TOKEN has two homes; over a resource service's, one."""
+    assert set(planes.PLANE_BY_METHOD) == {
+        m for p, ms in METHODS_BY_PLANE.items() if p in planes.RESOURCE_SERVICE_PLANES for m in ms
+    }
+    assert planes.PLANE_BY_METHOD[ONE_SHOT_TOKEN] == CALLBACK
 
 
 # ── lookups fail loudly ─────────────────────────────────────────────────────
@@ -104,8 +131,10 @@ def test_an_unknown_plane_raises_rather_than_reading_as_public():
 
 
 def test_an_unknown_method_raises():
-    with pytest.raises(ValueError, match="unknown authentication method"):
+    with pytest.raises(ValueError, match="no resource-service plane"):
         plane_for("API_KEY")
+    with pytest.raises(ValueError, match="no resource-service plane"):
+        plane_for("REFERENCE_TOKEN")  # CLIENT's only
 
 
 # ── the east-west seam ──────────────────────────────────────────────────────

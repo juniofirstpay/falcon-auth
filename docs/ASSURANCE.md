@@ -123,11 +123,14 @@ elevation. Those are precisely the routes where correctness is worth a round tri
 
 ## Three outcomes, kept deliberately apart
 
-| Raised | Means | What the client should do |
-|---|---|---|
-| `StepUpRequired` | live session, not elevated | raise a challenge, then retry |
-| `SessionMiss` | session dead, unknown, or not theirs | re-authenticate — a challenge cannot help |
-| `AuthzUnavailable` | the lookup itself failed | retry; nothing the user can fix |
+| Raised | Wire (`registry/PLAT.md`) | Means | What the client should do |
+|---|---|---|---|
+| `StepUpRequired` | `401 PLAT0109` (RUL-086) | live session, not elevated | raise a challenge, then retry |
+| `SessionMiss` | `403 PLAT0106` | session dead, unknown, or not theirs | re-authenticate — a challenge cannot help |
+| `AuthzUnavailable` | `503` | the lookup itself failed | retry; nothing the user can fix |
+
+`StepUpRequired` and an expired token are both `401`, so a client branches on the **code**:
+`PLAT0109` means raise a challenge; `PLAT0101` means sign in.
 
 Collapsing these is the failure worth avoiding. Answer *"go and step up"* when the real problem
 is that auth is unreachable, and you send the user to complete a challenge that **cannot** help

@@ -281,12 +281,13 @@ def _check_binding_declared(selector: Selector, binding: Any, owner: str) -> Non
         logger.warning("dpop_binding_undeclared", authenticator=owner, header=selector.header)
 
 
-def _planes(plane: Plane | Iterable[Plane]) -> frozenset[Plane]:
-    found = frozenset([plane]) if isinstance(plane, str) else frozenset(plane)
-    unknown = sorted(p for p in found if p not in PLANES)
-    if not found or unknown:
-        raise ValueError(f"plane must be one or more of {sorted(PLANES)}; got {sorted(found)}")
-    return found
+def _planes(plane: Plane) -> frozenset[Plane]:
+    if not isinstance(plane, str) or plane not in PLANES:
+        raise ValueError(
+            f"plane must be ONE of {sorted(PLANES)}; got {plane!r}. A credential authenticates on "
+            f"one plane (C-060 §3)"
+        )
+    return frozenset([plane])
 
 
 class PlaneAuthenticator:
@@ -305,9 +306,7 @@ class PlaneAuthenticator:
     selector: Selector | None
     single_use: bool = False
 
-    def __init__(
-        self, *, plane: Plane | Iterable[Plane], method: Method, selector: Selector | None
-    ) -> None:
+    def __init__(self, *, plane: Plane, method: Method, selector: Selector | None) -> None:
         self.planes = _planes(plane)
         self.method = method
         self.selector = selector
@@ -331,7 +330,7 @@ class JWTAuthenticator(PlaneAuthenticator):
         other failure is "could not check", a 503 -- during a JWKS outage that is the difference
         between "retry" and "every user's token went bad at once".
     :param selector: where the token is read.
-    :param plane: the plane, or planes, it authenticates on.
+    :param plane: the ONE plane it authenticates on.
     :param user_cls: build ``user_cls(id=sub, type=user_type, **forwarded claims)`` -- today's
         ``jwt_authenticator`` behaviour. Needs the verifier's ``principal_claims``.
     :param principal: OR an async ``claims -> principal`` of the host's (auth loads the session
@@ -350,7 +349,7 @@ class JWTAuthenticator(PlaneAuthenticator):
         verifier: Any,
         selector: Selector,
         *,
-        plane: Plane | Iterable[Plane] = USER,
+        plane: Plane = USER,
         user_cls: type[Any] | None = None,
         principal: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
         binding: Binding | None = None,
@@ -416,6 +415,10 @@ class ReferenceAuthenticator(PlaneAuthenticator):
 
         Returning ``None`` for a token that WAS presented is read as unknown (401), never as
         absent: the selector already found it. Any other exception, or the timeout, is 503.
+    :param plane: required, deliberately. C-060 puts a reusable reference token on CLIENT only --
+        the identity provider's, refused in a resource service -- and a one-shot token
+        (``single_use=True``) on CLIENT or CALLBACK. A resource service's use is a CALLBACK
+        source's one-shot token; there is no default that would be right.
     :param timeout: seconds before the lookup counts as unreachable. ``None`` waits.
 
     **Never cached here.** Instant revocation is the one thing a reference token has over a JWT;
@@ -429,7 +432,7 @@ class ReferenceAuthenticator(PlaneAuthenticator):
         lookup: Callable[[str], Awaitable[Any]],
         selector: Selector,
         *,
-        plane: Plane | Iterable[Plane] = USER,
+        plane: Plane,
         binding: Binding | None = None,
         single_use: bool = False,
         timeout: float | None = None,
@@ -487,16 +490,35 @@ class MTLSAuthenticator(PlaneAuthenticator):
     not recognise, so it is a present-and-invalid credential; on the wrong-plane search a raise
     ends the lookup at a 401 rather than confirming the endpoint exists with a 404. C-038 step 4
     needs a VALID credential for another plane, and an unknown CN is not one.
+
+    :param transport_peers: the allow-list ``source`` names of **forwarding hops** -- the
+        gateway, a sidecar -- whose certificate arrives on requests they FORWARD. C-060 §6: the
+        forwarding hop's certificate is transport, ⛔ never a caller credential in the
+        wrong-plane search. Without this, a user request reaching a USER route through a gateway
+        that is also an allow-listed peer (it calls some routes on its own behalf, C-006) and
+        carrying no token would answer 404 instead of 401. On a SERVICE route the hop is an
+        ordinary caller: this changes only the search.
     """
 
-    def __init__(self, verifier: Verifier, *, plane: Plane | Iterable[Plane] = SERVICE) -> None:
+    def __init__(
+        self,
+        verifier: Verifier,
+        *,
+        plane: Plane = SERVICE,
+        transport_peers: Iterable[str] = (),
+    ) -> None:
         super().__init__(plane=plane, method=MTLS, selector=Selector.TLS)
         self._verifier = verifier
+        self.transport_peers = frozenset(transport_peers)
 
     async def __call__(self, req: Any) -> Any | None:
         if peer_cn(req.scope) is None:
             return None
         return self._verifier.authenticate(req.scope)
+
+    def is_transport(self, principal: Any) -> bool:
+        """Whether ``principal`` is a forwarding hop -- absent, for the wrong-plane search."""
+        return getattr(principal, "source", None) in self.transport_peers
 
 
 class CustomAuthenticator(PlaneAuthenticator):
@@ -510,7 +532,7 @@ class CustomAuthenticator(PlaneAuthenticator):
         self,
         attempt: Callable[[Any], Awaitable[Any | None]],
         *,
-        plane: Plane | Iterable[Plane],
+        plane: Plane,
         method: Method,
         selector: Selector | None = None,
         single_use: bool = False,
@@ -573,9 +595,11 @@ def jwt_authenticator(
     )
 
 
-def mtls_authenticator(verifier: Verifier) -> MTLSAuthenticator:
+def mtls_authenticator(
+    verifier: Verifier, *, transport_peers: Iterable[str] = ()
+) -> MTLSAuthenticator:
     """A tri-state mTLS authenticator on the SERVICE plane -- a :class:`MTLSAuthenticator`."""
-    return MTLSAuthenticator(verifier)
+    return MTLSAuthenticator(verifier, transport_peers=transport_peers)
 
 
 def _token_from(header_value: str, scheme: str | None) -> str | None:

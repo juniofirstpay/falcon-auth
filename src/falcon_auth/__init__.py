@@ -10,7 +10,7 @@ Four parts, one question: **may this caller do this?**
 Three modules sit above the parts because they are the shared vocabulary the package exists
 to unify — none of them ever moves inside a part:
 
-    planes.py          the four planes, the registry, and the mount that records them
+    planes.py          the five planes (C-060) and the methods each holds
     principal.py       one principal model, both planes
     trustcontext.py    ONE call to auth, read by both assurance and entitlement
 

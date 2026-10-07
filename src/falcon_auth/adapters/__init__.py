@@ -40,8 +40,8 @@ Modules:
     routing.py          PlaneRegistry · mount · verify_app -- one plane per endpoint,
                         refused at startup (C-006)
     middleware.py       PlaneAuthenticationMiddleware -- the per-request assertion that the
-                        caller's credential matches the endpoint's plane, and the
-                        wrong-plane 404 (C-038)
+                        caller presented the endpoint's one credential, and the
+                        wrong-plane 404 PLAT0006 (C-038, C-060)
 """
 
 from __future__ import annotations
@@ -68,7 +68,6 @@ from .middleware import (
     Authenticator,
     ConventionDeviation,
     PlaneAuthenticationMiddleware,
-    Profile,
 )
 from .routing import (
     DEFAULT_PROBE_PATHS,
@@ -132,7 +131,6 @@ __all__ = (
     "JWTAuthenticator",
     "MTLSAuthenticator",
     "PlaneAuthenticator",
-    "Profile",
     "PROVEN_AT_PERIMETER",
     "ReferenceAuthenticator",
     "Selector",
