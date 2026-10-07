@@ -15,7 +15,7 @@ include = [
 
 [project]
 name = "falcon-auth"
-version = "0.2.0"
+version = "0.3.0"
 authors = [{ name = "Akshat Manohar", email = "akshat.manohar@junio.in" }]
 description = "Every post-transport trust decision a Falcon service makes: east-west mTLS identity, token authentication, session assurance, and entitlement."
 readme = "README.md"
