@@ -37,6 +37,8 @@ Modules:
     hooks.py            ... plus verify_operation_for -- per-operation step-up, called
                         INLINE from a responder rather than as a hook, because the
                         idempotency reservation it must follow is itself inline
+    rawbody.py          RawBodyBuffer -- an ASGI wrapper keeping the request body's exact
+                        bytes for the C-058 body hash, replayed to Falcon unchanged
     routing.py          PlaneRegistry · mount · verify_app -- one plane per endpoint,
                         refused at startup (C-006)
     middleware.py       PlaneAuthenticationMiddleware -- the per-request assertion that the
@@ -69,6 +71,7 @@ from .middleware import (
     ConventionDeviation,
     PlaneAuthenticationMiddleware,
 )
+from .rawbody import RAW_BODY_SCOPE_KEY, RawBodyBuffer, raw_body
 from .routing import (
     DEFAULT_PROBE_PATHS,
     Endpoint,
@@ -134,4 +137,8 @@ __all__ = (
     "PROVEN_AT_PERIMETER",
     "ReferenceAuthenticator",
     "Selector",
+    # issue #7 / C-058: the raw body, for the one-shot body binding
+    "RAW_BODY_SCOPE_KEY",
+    "RawBodyBuffer",
+    "raw_body",
 )

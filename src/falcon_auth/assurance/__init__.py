@@ -30,6 +30,7 @@ from __future__ import annotations
 from .operation import (
     AUTH_CODE_OPERATION_MISS,
     BodyHasher,
+    raw_body_hash,
     HttpOperationVerifier,
     OperationBodyMismatch,
     OperationChallengeMiss,
@@ -43,6 +44,7 @@ from .stepup import check_session_elevated
 __all__ = (
     "AUTH_CODE_OPERATION_MISS",
     "BodyHasher",
+    "raw_body_hash",
     "check_session_elevated",
     "HttpOperationVerifier",
     "OperationBodyMismatch",
