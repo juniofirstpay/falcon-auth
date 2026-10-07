@@ -15,13 +15,20 @@ and `AuthzUnavailable` in particular is a trust-context lookup failure rather th
 specific to authorization. Renaming them is a deliberate later change -- it is a public API
 break for two services, and doing it inside a port would make the port unauditable.
 
-The mapping a host is expected to apply, from the contract's §11.2 denial table:
+The mapping a host is expected to apply -- statuses and codes from the platform register
+(`registry/PLAT.md`):
 
-    Unauthenticated   -> 401   no token, or the authn hook never ran
-    CapabilityDenied  -> 403   authenticated, lacks the entitlement. Do not retry.
-    SessionMiss       -> 403   the session is dead/unknown -- still a DENY, see below
-    StepUpRequired    -> 403   entitled, but the session is not elevated. Retry AFTER a challenge.
-    AuthzUnavailable  -> 503   authorization state could not be established. Retry with backoff.
+    Unauthenticated   -> 401 PLAT0101   no token, or the authn hook never ran
+    CapabilityDenied  -> 403 PLAT0102   authenticated, lacks the capability. Do not retry. Both
+                                        planes since C-055 (`PLAT0105` retired)
+    SessionMiss       -> 403 PLAT0106   the session is dead/unknown -- still a DENY, see below
+    StepUpRequired    -> 401 PLAT0109   entitled, but the session is not elevated. Retry AFTER a
+                                        challenge (RUL-086; RFC 9470's status)
+    AuthzUnavailable  -> 503            authorization state could not be established. Retry with
+                                        backoff
+
+and, from the plane middleware, a wrong-plane credential -> 404 PLAT0006, the router miss
+(RUL-158) -- raised as Falcon's own `HTTPRouteNotFound`, so the host's router-miss handler renders it.
 
 **`SessionMiss` is a denial, not an outage, and the distinction is load-bearing.** §5: *"a dead or
 unknown session is a deny, not an error. An unreachable auth service is an error."* Reporting a
@@ -29,19 +36,14 @@ logged-out session as `503` tells the client to retry a request that will never 
 genuine outage as `403` tells it to give up on one that would. It subclasses `CapabilityDenied` so a
 host that does not care gets the right status for free, and one that does can still tell them apart.
 
-**On `StepUpRequired` being 403 (issue #1 A16).** A draft platform code, `PLAT0109`, is said to
-put this at 401. It is deferred because that code DOES NOT EXIST: there is no `PLAT0109` in
-`platform-conventions`, no step-up code of any number, and the cited `registry/errors/README.md`
-is not in the repo. There is nothing to conform to yet.
-
-When it lands we would argue for 403 rather than adopt 401, for three reasons worth stating
-before a code is allocated. `PLAT0106 session_not_live` is already 403 with "Your session has
-ended. Please sign in again." -- the same shape, and auth's own `8400 scope_insufficient` and
-`8503 device_trust_insufficient` are 403 too. A 401 invites the wrong client reflex: many
-clients and gateways treat it as "refresh the token and retry", which can never resolve here
-because the token is valid and what is missing is a FACTOR. And the status is not carrying the
-signal anyway -- this class deliberately does not subclass `CapabilityDenied`, so a host maps it
-explicitly, and `required` / `present` ride in `extras` for the client to branch on.
+**`StepUpRequired` is `401 PLAT0109`** (issue #1 A16, settled). An earlier version of this
+docstring said the code did not exist and argued for 403. It exists: allocated 2026-09-24 by
+RUL-086, at 401, matching RFC 9470's step-up challenge. The concern behind the 403 argument still
+applies to clients: many treat a bare 401 as "refresh the token and retry", which can never resolve
+here because the token is valid and what is missing is a FACTOR. So a client must branch on the
+CODE, not the status -- `PLAT0109` means "raise a challenge", `PLAT0101` means "sign in". This class
+deliberately does not subclass `CapabilityDenied`, so a host maps it explicitly, and `required` /
+`present` ride in `extras` for the client to branch on.
 
 **A `403` from the auth service is `AuthzUnavailable`, never a denial.** It means *our* client
 certificate lacks the `trust:read` scope -- a deployment fault. Surfacing it as a user denial would

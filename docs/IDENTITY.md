@@ -220,7 +220,7 @@ opted out of key rotation, so keep it behind an explicit dev-only branch.
 
 ## Where this sits
 
-Identity is the USER plane's half of [`FLOW.md`](FLOW.md)'s four planes, the counterpart to
+Identity is the USER plane's part of [`FLOW.md`](FLOW.md)'s planes, the counterpart to
 [EASTWEST.md](EASTWEST.md)'s SERVICE and CALLBACK. The plane middleware decides that a route
 takes a JWT; this decides whether the JWT is real and whose it is.
 

@@ -1,25 +1,28 @@
 """The per-request half of the plane system: which credential may open this endpoint.
 
 :mod:`falcon_auth.adapters.routing` decides at startup which plane an endpoint is on. This
-decides, per request, whether the caller presented the credential that plane accepts -- the
+decides, per request, whether the caller presented the credential the endpoint accepts -- the
 second of RUL-046's two guards, and the half C-006 records as "the comparison is missing
-everywhere". There was nothing in the estate to port; this is built from C-038's resolution
-table:
+everywhere". Built from C-038's resolution table, as C-060 (`v30`) refines it:
 
-    1  the endpoint's declared plane selects the PRIMARY authentication method
+    1  the endpoint's ONE declared credential is the primary
     2  primary credential present but INVALID          -> 401
-    3  primary credential ABSENT                       -> look for the other methods'
-    4  a VALID credential for a DIFFERENT plane        -> 404, body identical to a genuine
-                                                          not-found, and the mismatch is
-                                                          logged and flagged
+    3  primary credential ABSENT                       -> look for a credential of ANOTHER
+                                                          plane -- only one verifiable WITHOUT
+                                                          I/O: a JWT, or the TLS peer (C-060 §6)
+    4  a VALID credential for a DIFFERENT plane        -> 404 PLAT0006, byte-identical to a
+                                                          router miss, logged and flagged
     5  no credential of any kind                       -> 401
 
 WHY 404 AND NOT 403 AT STEP 4. C-038 supersedes C-006's `403 PLAT0107` here. A 403 confirms the
 endpoint exists, which hands an attacker holding a user token a map of the service plane: probe
 a path, read the status, learn whether an internal route sits behind it. A 404 tells them
-nothing they did not already know. The body must be INDISTINGUISHABLE from a real not-found,
-which is why :class:`PlaneAuthenticationMiddleware` takes the host's own not-found exception as
-a required argument rather than inventing one -- see :paramref:`not_found_error`.
+nothing they did not already know -- and it must be the ROUTE not-found, `PLAT0006`, the body a
+path that does not exist at all would get (RUL-158). `PLAT0008` is record-level only (C-015):
+answering a wrong-plane credential with it would let a caller tell an existing route from a
+missing one, the very oracle step 4 exists to close. By default this raises Falcon's own
+:class:`falcon.HTTPRouteNotFound`, so whatever the host renders for a router miss is what a
+wrong-plane caller sees -- identical by construction, not by care.
 
 WHY AN INVALID FOREIGN CREDENTIAL IS NOT A STEP-4 MISMATCH. Step 4 says a *valid* credential for
 another plane. Garbage in an ``Authorization`` header on a service-plane route is not evidence
@@ -27,38 +30,39 @@ that a user-plane caller wandered in; it is evidence of a caller with no usable 
 all, which is step 5 and a 401. Treating it as a mismatch would answer 404 to callers who are
 merely broken, and would let anyone map the estate by sending nonsense.
 
-WHICH CREDENTIALS A ROUTE ACCEPTS (falcon-auth#6). Authenticators come in one of two shapes:
+WHY ONLY I/O-FREE CREDENTIALS IN THE SEARCH (C-060 §6). Checking a reference token, a one-shot
+token or a client-key proof needs a lookup. Searching them would let any probe carrying junk
+turn the 404 rule into database load; they count as absent there, giving step 5's 401. The
+**forwarding hop's** certificate is transport, never a caller credential: see
+``MTLSAuthenticator(transport_peers=...)``.
 
-    {Method: callable}         the original shape. One authenticator per method, attached to the
-                               plane C-038 puts that method on. Every consumer written before #6
-                               uses it, and it keeps working unchanged.
-    {name: PlaneAuthenticator} named, configured credentials, each attached to the plane(s) it
-                               authenticates on -- the identity provider's shape, where USER
-                               carries an access token, a pre-login client session, a link token
-                               and a client-key proof.
+WHICH CREDENTIAL A ROUTE ACCEPTS. **Exactly one** (C-060 §3; C-031's reason at route grain: a
+request that may prove itself two ways is a request an attacker may prove one way). A route pins
+it with ``mount(..., credential=)``, or, pinning none, takes the ONE authenticator on its plane;
+a plane carrying two (CALLBACK's HMAC and one-shot token) needs every route to pin. Authenticators
+come in one of two shapes:
 
-A route accepts the authenticators it pins with ``mount(..., credential=)``, or, pinning none,
-every authenticator on its plane. Exactly one per plane and one per route is what C-038 and
-C-031 rule; it is a RECOMMENDATION here, held by ``verify(profile="strict")`` and reported by
-``verify(profile="permissive")``. What is NOT optional is listed on :meth:`verify`.
+    {Method: callable}         the original shape: one per method, placed on the plane C-060 puts
+                               that method on for a resource service. Unchanged.
+    {name: PlaneAuthenticator} named, configured credentials, each on its one plane.
 
-THE WRONG-PLANE SEARCH, GENERALISED. Step 4 looks for a valid credential "for a different plane".
-With named authenticators that means: an authenticator registered on NO plane of this route's.
-One on the same plane that this route simply does not accept is not foreign -- its holder gets
-step 5's 401, and learns nothing about the plane.
+A credential of the SAME plane that this route does not accept is not foreign -- its holder
+gets step 5's 401, and learns nothing about the plane.
 
 THE FOUR THINGS IT STAMPS. ``req.context.plane``, ``req.context.auth_method``,
 ``req.context.auth_principal`` and ``req.context.auth_credential`` (the name of the authenticator
-that opened the route -- the method itself, in the original shape). It deliberately does NOT write ``principal`` or
-``eastwest_principal``: those are the existing hooks' slots, holding two models that share no
-field, and a middleware that cannot tell which it is holding must not pick one of them.
+that opened the route -- the method itself, in the original shape). It deliberately does NOT
+write ``principal`` or ``eastwest_principal``: those are the existing hooks' slots, holding two
+models that share no field, and a middleware that cannot tell which it is holding must not pick
+one of them.
 """
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Protocol, get_args
 
+import falcon
 from structlog import get_logger
 
 from ..errors import Unauthenticated
@@ -66,6 +70,8 @@ from ..planes import (
     METHODS_BY_PLANE,
     PLANE_BY_METHOD,
     PUBLIC,
+    RESOURCE_SERVICE_PLANES,
+    SEARCHABLE_METHODS,
     Method,
     Plane,
     methods_for,
@@ -86,7 +92,6 @@ __all__ = (
     "ConventionDeviation",
     "PLANE_ATTR",
     "PlaneAuthenticationMiddleware",
-    "Profile",
 )
 
 logger = get_logger(__name__)
@@ -102,18 +107,15 @@ AUTH_PRINCIPAL_ATTR = "auth_principal"
 #: that must spend a single-use credential reads this to know which one it holds.
 AUTH_CREDENTIAL_ATTR = "auth_credential"
 
-#: ``strict`` refuses at boot what C-038 / C-031 do not allow; ``permissive`` logs it once.
-Profile = Literal["strict", "permissive"]
-
 _METHOD_NAMES: frozenset[str] = frozenset(get_args(Method))
 
 
 class ConventionDeviation(PlaneConflict):
-    """``verify(profile="strict")`` found an arrangement C-038 / C-031 do not allow.
+    """An authenticator is wired in a way C-060 does not allow -- refused at construction.
 
-    A subclass of :class:`PlaneConflict` -- a host already failing its startup on that keeps
-    doing so -- and distinct from it, so a host can tell "this cannot work" from "this works and
-    is not what the conventions recommend".
+    A method on a plane C-060 does not put it on, or on a plane a resource service may not mount.
+    A subclass of :class:`PlaneConflict`, so a host already failing its startup on that keeps
+    doing so.
     """
 
 
@@ -130,7 +132,7 @@ class Authenticator(Protocol):
     token would fall through to the step-3 search and be answered 404 instead of 401, which
     tells an attacker that a bad token and no token are different things and that the endpoint
     is on some other plane. Collapsing them the other way -- raising on absent -- would make
-    step 3 unreachable and break the CALLBACK plane, which legitimately tries two methods.
+    step 3 unreachable.
     """
 
     async def __call__(self, req: Any) -> Any | None: ...
@@ -142,7 +144,7 @@ class _Entry:
 
     name: str
     method: Method | None
-    planes: frozenset[Plane]
+    plane: Plane
     attempt: Authenticator
     selector: Any | None  # a Selector; typed loosely to keep this module free of the adapters'
 
@@ -156,26 +158,15 @@ class PlaneAuthenticationMiddleware:
         middleware = PlaneAuthenticationMiddleware(
             registry,
             authenticators={
-                planes.JWT: jwt_authenticator,
-                planes.MTLS: mtls_authenticator,
+                planes.JWT: jwt_authenticator(verifier, User, scheme="DPoP",
+                                              binding=PROVEN_AT_PERIMETER),
+                planes.MTLS: mtls_authenticator(allow_list_verifier),
             },
-            not_found_error=lambda: OrderNotFoundError(extras={"order_id": None}),
         )
         app = falcon.asgi.App(middleware=[middleware])
         mount(registry, app, "/v1/orders", OrdersResource(), plane=planes.USER)
         verify_app(app, registry)
         middleware.verify()
-
-    Named credentials, pinned per route (falcon-auth#6)::
-
-        authenticators = {
-            "access_token": JWTAuthenticator(..., plane=USER, binding=...),
-            "client_session": ReferenceAuthenticator(..., plane=USER, binding=...),
-            "mtls": MTLSAuthenticator(verifier),
-        }
-        mount(registry, app, "/v1/token:create", token_route, suffix="create",
-              plane=USER, credential="client_session")
-        middleware.verify(profile="permissive")
     """
 
     def __init__(
@@ -183,7 +174,7 @@ class PlaneAuthenticationMiddleware:
         registry: PlaneRegistry,
         *,
         authenticators: Mapping[Any, Authenticator],
-        not_found_error: Callable[[], BaseException],
+        not_found_error: Callable[[], BaseException] = falcon.HTTPRouteNotFound,
         on_plane_mismatch: Callable[[str, Plane, Method], None] | None = None,
         exempt_paths: Collection[str] = DEFAULT_PROBE_PATHS,
     ) -> None:
@@ -191,20 +182,17 @@ class PlaneAuthenticationMiddleware:
         :param registry: the registry the routes were mounted through. Shared, not rebuilt: a
             second registry would be empty, and an empty registry refuses every request.
 
-        :param authenticators: ``{Method: callable}`` -- one per method, on the plane C-038 puts
-            it -- or ``{name: PlaneAuthenticator}``, each attached to its own plane(s). Keys that
-            are all method names select the first reading; a mix is refused. A method with no
-            entry is one this service cannot verify, so a credential of that kind is invisible
-            here -- correct for step 3, and harmless for steps 1-2 because a route whose plane
-            has nothing that can open it is refused (at boot by :meth:`verify`, else at first
-            request).
+        :param authenticators: ``{Method: callable}`` -- one per method, on the plane C-060 puts
+            it for a resource service -- or ``{name: PlaneAuthenticator}``, each on its one plane.
+            Keys that are all method names select the first reading; a mix is refused. A method
+            with no entry is one this service cannot verify, so a credential of that kind is
+            invisible here.
 
-        :param not_found_error: builds the exception raised on a step-4 plane mismatch.
-            **Required, with no default, and the reason is the whole point of the 404.** The
-            body must be indistinguishable from a genuine not-found, and only the host knows
-            what its genuine not-found looks like. A default here would emit a *recognisably
-            different* 404 -- which is a 403 wearing a costume, and hands back exactly the
-            signal the status code was chosen to withhold.
+        :param not_found_error: builds the exception raised on a step-4 plane mismatch. The body
+            must be the ROUTE not-found -- `PLAT0006`, byte-identical to a router miss (RUL-158).
+            The default, :class:`falcon.HTTPRouteNotFound`, is the exception Falcon itself raises
+            on a router miss, so the host's own handler renders both and they cannot differ.
+            Override only with something that renders exactly as that does.
 
         :param on_plane_mismatch: called as ``(uri_template, endpoint_plane, credential_method)``
             when step 4 fires. C-038 requires the mismatch be "logged and flagged"; the log
@@ -214,96 +202,65 @@ class PlaneAuthenticationMiddleware:
 
         :param exempt_paths: route templates the middleware stands aside for when they were
             NEVER REGISTERED -- health and readiness probes, which sit outside the plane system
-            (RUL-033). The same default as :func:`~falcon_auth.adapters.routing.verify_app`, and
-            pass the same value to both. Without it, an unregistered probe reached this hook,
-            had no registry row, and raised on every probe. A registered route is never exempt:
-            naming a USER route here cannot make it public.
+            (RUL-033, RUL-135). The same default as
+            :func:`~falcon_auth.adapters.routing.verify_app`; pass the same value to both. A
+            registered route is never exempt: naming a USER route here cannot make it public.
 
-        :raises PlaneConflict: when authenticators on different planes read the same carrier --
-            see :meth:`verify`, rule 4. Checked here because it needs no routes.
+        :raises ConventionDeviation: an authenticator on a plane this package's hosts may not
+            mount (CLIENT, C-060 §2), or carrying a method C-060 does not put on its plane.
+        :raises PlaneConflict: authenticators on different planes reading the same carrier.
         """
         self._registry = registry
         self._entries, self._legacy = _normalise(authenticators)
         self._not_found_error = not_found_error
         self._on_plane_mismatch = on_plane_mismatch
         self._exempt_paths = frozenset(exempt_paths)
+        _refuse_off_convention(self._entries.values())
         _refuse_cross_plane_overlap(self._entries.values())
 
     # -- boot ---------------------------------------------------------------------------
 
-    def verify(self, *, profile: Profile = "strict") -> None:
-        """Refuse to start on any wiring gap; and, by profile, on any departure from C-038.
+    def verify(self) -> None:
+        """Refuse to start if any mounted route has no single credential that can open it.
 
         Call it once, after every route is mounted, beside
-        :func:`falcon_auth.adapters.routing.verify_app`. :meth:`_accepted` makes the same gap
-        checks on the FIRST REQUEST to a route, which is too late once this middleware is the
-        only thing authenticating: a mis-wired plane looks healthy through deploy and smoke
-        tests, and is found by a caller.
+        :func:`falcon_auth.adapters.routing.verify_app`. :meth:`_accepted` makes the same check
+        on the FIRST REQUEST to a route, which is too late once this middleware is the only
+        thing authenticating: a mis-wired plane looks healthy through deploy and smoke tests,
+        and is found by a caller. C-061 §1: a broken property refuses start.
 
-        **Always refused** -- each would make the middleware give a wrong answer:
+        Refused, naming every route at fault:
 
-            1  a route whose plane has nothing that can open it, or that pins an authenticator
-               that does not exist or is not on its plane
-            2  two authenticators accepted on ONE route reading the same carrier: a valid
-               credential of one kind would be an invalid one of the other, and a legitimate
-               caller would get a 401
-            3  (at mount) a PUBLIC route naming a credential
-            4  (at construction) authenticators on different planes reading the same carrier:
-               the wrong-plane search would turn a valid credential of one plane into an
-               invalid one of the other
+            a plane with mounted routes and no authenticator for it
+            a pin naming an authenticator that does not exist, or one on another plane
+            an unpinned route on a plane carrying two authenticators -- it would accept
+            "any of" two credentials (C-060 §3); pin one
 
-        **By profile** -- what C-038 and C-031 rule, and this package recommends:
-
-            R1  a plane carries a method C-038 does not put there (METHODS_BY_PLANE)
-            R2  an authenticator is attached to more than one plane
-            R3  a route accepts two authenticators of the SAME method -- two ways to prove one
-                thing, and the caller picks the weaker (C-031). Two different methods both in
-                the plane's map, as CALLBACK's HMAC and one-shot token, are C-038's own
-                allowance and pass
-
-        ``strict`` raises :class:`ConventionDeviation` naming every finding; ``permissive``
-        logs each once and starts. The identity provider runs permissive (falcon-auth#6); a
-        resource service should not need to.
+        Refused earlier, at construction and at mount: an authenticator off C-060's table, two
+        planes' authenticators on one carrier, a CLIENT route, a PUBLIC route naming a
+        credential, ``credential=`` given a list.
 
         PUBLIC is skipped: no method authenticates there, which is a declaration rather than a
         gap (see :data:`falcon_auth.planes.METHODS_BY_PLANE`).
 
-        :raises UnregisteredRoute: rule 1, naming every plane at fault, what it needs, and up to
-            three example routes, so a service with two mis-wired planes fixes both in one pass.
-        :raises PlaneConflict: rule 2.
-        :raises ConventionDeviation: R1-R3, under ``strict``.
+        :raises UnregisteredRoute: naming every plane at fault, what it needs, and up to three
+            example routes, so a service with two mis-wired planes fixes both in one pass.
         """
-        if profile not in ("strict", "permissive"):
-            raise ValueError(f"profile must be 'strict' or 'permissive'; got {profile!r}")
-
         gaps: dict[Plane, tuple[list[str], list[str]]] = {}
-        pin_errors: list[str] = []
-        overlaps: list[str] = []
-        same_method: list[str] = []
+        wrong: list[str] = []
         for registration in self._registry.routes().values():
-            plane = registration.plane
-            if plane == PUBLIC:
+            if registration.plane == PUBLIC:
                 continue
-            endpoint = str(registration.endpoint)
             try:
-                accepted = self._accepted(registration)
+                self._accepted(registration)
             except _Gap as gap:
-                if gap.pinned:
-                    pin_errors.append(f"{endpoint}: {gap}")
-                else:
-                    _, examples = gaps.setdefault(plane, (gap.missing, []))
+                endpoint = str(registration.endpoint)
+                if gap.kind == "missing":
+                    _, examples = gaps.setdefault(registration.plane, (gap.missing, []))
                     if len(examples) < 3:
                         examples.append(endpoint)
-                continue
-            overlaps.extend(_route_overlaps(endpoint, accepted))
-            by_method: dict[Method | None, list[str]] = {}
-            for entry in accepted:
-                by_method.setdefault(entry.method, []).append(entry.name)
-            same_method.extend(
-                f"{endpoint} accepts {names} -- all {method}"
-                for method, names in by_method.items()
-                if method is not None and len(names) > 1
-            )
+                else:
+                    wrong.append(f"{endpoint}: {gap}")
 
         if gaps:
             detail = "; ".join(
@@ -314,42 +271,10 @@ class PlaneAuthenticationMiddleware:
                 f"these planes have mounted routes but no authenticator was supplied for their "
                 f"method, so nothing could open them: {detail}"
             )
-        if pin_errors:
+        if wrong:
             raise UnregisteredRoute(
-                "these routes pin credentials that cannot open them: " + "; ".join(pin_errors)
+                "these routes do not resolve to exactly one credential: " + "; ".join(wrong)
             )
-        if overlaps:
-            raise PlaneConflict(
-                "these routes accept two authenticators reading the same carrier, so a valid "
-                "credential of one kind would be an invalid one of the other: "
-                + "; ".join(overlaps)
-            )
-
-        deviations = {
-            "R1 a plane carries a method C-038 does not put there": [
-                f"{e.name} ({e.method}) on {plane}"
-                for e in self._entries.values()
-                for plane in sorted(e.planes)
-                if e.method is not None and e.method not in METHODS_BY_PLANE[plane]
-            ],
-            "R2 an authenticator is attached to more than one plane": [
-                f"{e.name} on {sorted(e.planes)}"
-                for e in self._entries.values()
-                if len(e.planes) > 1
-            ],
-            "R3 a route accepts two authenticators of the same method": same_method,
-        }
-        found = {rule: items for rule, items in deviations.items() if items}
-        if not found:
-            return
-        if profile == "strict":
-            raise ConventionDeviation(
-                "this wiring departs from C-038 / C-031: "
-                + "; ".join(f"{rule}: {', '.join(items)}" for rule, items in found.items())
-                + ". verify(profile='permissive') starts anyway and logs each"
-            )
-        for rule, items in found.items():
-            logger.warning("plane_convention_deviation", rule=rule, findings=items)
 
     # -- per request ----------------------------------------------------------------------
 
@@ -370,7 +295,7 @@ class PlaneAuthenticationMiddleware:
             # Falcon DOES run this hook for a wrong-verb request -- a DELETE against a GET-only
             # resource -- and the registry has no row for that pair. If the template has other
             # rows, the route is known and this method simply is not served: Falcon's own 405 is
-            # the right answer and this hook stands aside.
+            # the right answer and this hook stands aside (RUL-158: 405 stays).
             if self._registry.registered_methods(template):
                 return
             # A probe, deliberately left out of the plane system (RUL-033). Only ever for a route
@@ -389,93 +314,81 @@ class PlaneAuthenticationMiddleware:
         plane = registration.plane
 
         if plane == PUBLIC:
-            # A stated-reason PUBLIC route. No credential is demanded, and none is inspected:
-            # looking would invite a handler to start trusting one that was never verified.
+            # A stated-reason PUBLIC route establishes no caller principal (C-060 §5). No
+            # credential is demanded, and none is inspected: looking would invite a handler to
+            # start trusting one that was never verified. Evidence the route needs is payload.
             self._stamp(req, plane, None)
             return
 
         try:
-            accepted = self._accepted(registration)
+            entry = self._accepted(registration)
         except _Gap as gap:
             raise UnregisteredRoute(f"{template}: {gap}") from None
 
         # Steps 1-2. A raise here propagates as a 401 and is NOT caught: a present-but-invalid
-        # credential this route accepts is a final answer, not a reason to go looking for another.
-        for entry in accepted:
-            principal = await entry.attempt(req)
-            if principal is not None:
-                self._stamp(req, plane, entry, principal)
-                return
+        # credential is a final answer, not a reason to go looking for another.
+        principal = await entry.attempt(req)
+        if principal is not None:
+            self._stamp(req, plane, entry, principal)
+            return
 
-        # Steps 3-4. Nothing this route accepts is present. Does the caller hold a valid
+        # Steps 3-4. The endpoint's credential is absent. Does the caller hold a valid
         # credential belonging to some other plane?
         foreign = await self._find_foreign_credential(req, plane)
         if foreign is not None:
             self._refuse_wrong_plane(req, template, plane, foreign)
 
         # Step 5. Nothing usable at all.
-        raise Unauthenticated(
-            f"this endpoint is on the {plane} plane and requires "
-            f"{' or '.join(e.name for e in accepted)}"
-        )
+        raise Unauthenticated(f"this endpoint is on the {plane} plane and requires {entry.name}")
 
     # -- the pieces -----------------------------------------------------------------------
 
-    def _accepted(self, registration: Registration) -> list[_Entry]:
-        """The authenticators this endpoint accepts, in the order they are tried.
+    def _accepted(self, registration: Registration) -> _Entry:
+        """The ONE authenticator this endpoint accepts.
 
-        Pinned: exactly those, in the order given. Unpinned: every authenticator on the plane --
-        and in the original ``{Method: callable}`` shape, EVERY method C-038 puts on the plane
-        must have one. A route whose plane has nothing that can open it is a wiring bug: it
-        fails loudly rather than answering 401 to every caller forever, which is the shape of
-        outage that gets diagnosed as a credential problem for a day and a half.
+        Pinned: that one, which must exist and sit on the route's plane. Unpinned: the one
+        authenticator on the plane; none is a wiring bug, and two means the route would accept
+        "any of" them (C-060 §3) -- it must pin. Either fails loudly rather than answering 401
+        to every caller forever, which is the shape of outage that gets diagnosed as a credential
+        problem for a day and a half.
         """
         plane = registration.plane
-        if registration.credentials is not None:
-            entries = []
-            for name in registration.credentials:
-                entry = self._entries.get(name)
-                if entry is None:
-                    raise _Gap(f"no authenticator named {name!r} was supplied", [name], True)
-                if plane not in entry.planes:
-                    raise _Gap(
-                        f"{name!r} authenticates on {sorted(entry.planes)}, not {plane}",
-                        [name],
-                        True,
-                    )
-                entries.append(entry)
-            return entries
+        name = registration.credential
+        if name is not None:
+            entry = self._entries.get(name)
+            if entry is None:
+                raise _Gap(f"no authenticator named {name!r} was supplied", "pin")
+            if entry.plane != plane:
+                raise _Gap(f"{name!r} authenticates on {entry.plane}, not {plane}", "pin")
+            return entry
 
-        if self._legacy:
-            methods = methods_for(plane)
-            missing: list[str] = sorted(methods - self._entries.keys())
-            if missing:
-                raise _Gap(
-                    f"{plane} plane authenticates by {sorted(methods)}, but no authenticator "
-                    f"was supplied for {missing}",
-                    missing,
-                    False,
-                )
-            return [self._entries[m] for m in sorted(methods)]
-
-        entries = sorted(
-            (e for e in self._entries.values() if plane in e.planes), key=lambda e: e.name
-        )
-        if not entries:
+        on_plane = sorted((e for e in self._entries.values() if e.plane == plane),
+                          key=lambda e: e.name)
+        if not on_plane:
             raise _Gap(
-                f"no authenticator is attached to the {plane} plane", [f"<any on {plane}>"], False
+                f"no authenticator was supplied for the {plane} plane",
+                "missing",
+                missing=sorted(methods_for(plane)),
             )
-        return entries
+        if len(on_plane) > 1:
+            raise _Gap(
+                f"the {plane} plane carries {[e.name for e in on_plane]}, so an unpinned route "
+                f"would accept any of them; a route declares exactly one (C-060 §3) -- pass "
+                f"credential=",
+                "ambiguous",
+            )
+        return on_plane[0]
 
     async def _find_foreign_credential(self, req: Any, plane: Plane) -> _Entry | None:
-        """A valid credential from an authenticator on NO plane of this endpoint's, if any.
+        """A valid, I/O-free credential from an authenticator on another plane, if any.
 
-        Only authenticators this host supplied are considered -- a credential nobody here can
-        verify is not a credential anybody here can recognise as foreign. One on the SAME plane
-        that this route does not accept is not foreign either: its holder ends at step 5.
+        Only JWT and the TLS peer are tried (C-060 §6) -- anything needing a lookup counts as
+        absent. A forwarding hop's certificate counts as absent too. Only authenticators this
+        host supplied are considered: a credential nobody here can verify is not a credential
+        anybody here can recognise as foreign.
         """
         for entry in sorted(self._entries.values(), key=lambda e: e.name):
-            if plane in entry.planes:
+            if entry.plane == plane or entry.method not in SEARCHABLE_METHODS:
                 continue
             try:
                 principal = await entry.attempt(req)
@@ -485,16 +398,19 @@ class PlaneAuthenticationMiddleware:
                 # here. It is also not a mismatch: garbage is a caller with no usable credential,
                 # which is step 5's 401. See the module docstring.
                 return None
-            if principal is not None:
-                return entry
-            # `None` means no credential of THIS kind is present. Nothing was verified, so this
-            # does not count against Q88's budget and the search continues. Bounding on lookups
-            # rather than verifications would end the search at the first method the caller
-            # simply did not use -- which, iterating alphabetically, is usually the first one.
+            if principal is None:
+                # No credential of THIS kind is present. Nothing was verified, so this does not
+                # count against Q88's budget and the search continues.
+                continue
+            is_transport = getattr(entry.attempt, "is_transport", None)
+            if is_transport is not None and is_transport(principal):
+                # The forwarding hop's certificate: transport, never a caller credential.
+                continue
+            return entry
         return None
 
     def _refuse_wrong_plane(self, req: Any, template: str, plane: Plane, foreign: _Entry) -> None:
-        """Step 4: log, flag, and answer as though the endpoint did not exist."""
+        """Step 4: log, flag, and answer as though the route did not exist."""
         logger.warning(
             "plane_mismatch",
             uri_template=template,
@@ -502,7 +418,7 @@ class PlaneAuthenticationMiddleware:
             endpoint_plane=plane,
             credential=foreign.name,
             credential_method=foreign.method,
-            credential_plane="/".join(sorted(foreign.planes)),
+            credential_plane=foreign.plane,
         )
         if self._on_plane_mismatch is not None and foreign.method is not None:
             self._on_plane_mismatch(template, plane, foreign.method)
@@ -518,12 +434,12 @@ class PlaneAuthenticationMiddleware:
 
 
 class _Gap(Exception):
-    """A route nothing can open. Internal: becomes UnregisteredRoute at request or boot time."""
+    """A route without exactly one credential. Becomes UnregisteredRoute at request or boot."""
 
-    def __init__(self, message: str, missing: list[str], pinned: bool) -> None:
+    def __init__(self, message: str, kind: str, *, missing: list[str] | None = None) -> None:
         super().__init__(message)
-        self.missing = missing
-        self.pinned = pinned
+        self.kind = kind
+        self.missing = missing or []
 
 
 def _normalise(authenticators: Mapping[Any, Authenticator]) -> tuple[dict[str, _Entry], bool]:
@@ -534,15 +450,13 @@ def _normalise(authenticators: Mapping[Any, Authenticator]) -> tuple[dict[str, _
         entries = {}
         for method, attempt in authenticators.items():
             if method not in PLANE_BY_METHOD:
-                raise ValueError(
-                    f"{method!r} sits under no plane in METHODS_BY_PLANE, so the {{Method: "
-                    f"callable}} shape cannot place it; supply it as a named PlaneAuthenticator "
-                    f"with plane=..."
+                raise ConventionDeviation(
+                    f"{method!r} authenticates on no plane a resource service mounts (C-060 §2-§3)"
                 )
             entries[method] = _Entry(
                 name=method,
                 method=method,
-                planes=frozenset([PLANE_BY_METHOD[method]]),
+                plane=PLANE_BY_METHOD[method],
                 attempt=attempt,
                 selector=getattr(attempt, "selector", None),
             )
@@ -559,23 +473,35 @@ def _normalise(authenticators: Mapping[Any, Authenticator]) -> tuple[dict[str, _
             raise TypeError(
                 f"authenticator {name!r} declares no plane. Named authenticators must be "
                 f"PlaneAuthenticator instances (JWTAuthenticator, ReferenceAuthenticator, "
-                f"MTLSAuthenticator, CustomAuthenticator) so the middleware knows where each "
-                f"belongs"
+                f"MTLSAuthenticator, CustomAuthenticator) so the middleware knows where it belongs"
+            )
+        if len(planes) != 1:
+            raise ConventionDeviation(
+                f"authenticator {name!r} is on {sorted(planes)}; a credential authenticates on "
+                f"one plane (C-060 §3)"
             )
         entries[name] = _Entry(
             name=name,
             method=getattr(attempt, "method", None),
-            planes=frozenset(planes),
+            plane=next(iter(planes)),
             attempt=attempt,
             selector=getattr(attempt, "selector", None),
         )
     return entries, False
 
 
-def _overlap(a: _Entry, b: _Entry) -> bool:
-    if a.selector is None or b.selector is None:
-        return False
-    return bool(a.selector.overlaps(b.selector))
+def _refuse_off_convention(entries: Iterable[_Entry]) -> None:
+    found = []
+    for e in sorted(entries, key=lambda e: e.name):
+        if e.plane not in RESOURCE_SERVICE_PLANES:
+            found.append(f"{e.name} is on {e.plane}, which only the identity provider mounts")
+        elif e.method is not None and e.method not in METHODS_BY_PLANE[e.plane]:
+            found.append(
+                f"{e.name} ({e.method}) is on {e.plane}, which C-060 gives "
+                f"{sorted(METHODS_BY_PLANE[e.plane])}"
+            )
+    if found:
+        raise ConventionDeviation("these authenticators depart from C-060: " + "; ".join(found))
 
 
 def _refuse_cross_plane_overlap(entries: Iterable[_Entry]) -> None:
@@ -583,22 +509,11 @@ def _refuse_cross_plane_overlap(entries: Iterable[_Entry]) -> None:
     listed = sorted(entries, key=lambda e: e.name)
     for i, a in enumerate(listed):
         for b in listed[i + 1:]:
-            if not (a.planes & b.planes) and _overlap(a, b):
-                found.append(
-                    f"{a.name} ({'/'.join(sorted(a.planes))}) and "
-                    f"{b.name} ({'/'.join(sorted(b.planes))}) both read {a.selector}"
-                )
+            if a.plane != b.plane and a.selector is not None and b.selector is not None \
+                    and a.selector.overlaps(b.selector):
+                found.append(f"{a.name} ({a.plane}) and {b.name} ({b.plane}) both read {a.selector}")
     if found:
         raise PlaneConflict(
             "authenticators on different planes read the same carrier, so the wrong-plane "
             "search could not tell their credentials apart: " + "; ".join(found)
         )
-
-
-def _route_overlaps(endpoint: str, accepted: list[_Entry]) -> list[str]:
-    return [
-        f"{endpoint}: {a.name} and {b.name} both read {a.selector}"
-        for i, a in enumerate(accepted)
-        for b in accepted[i + 1:]
-        if _overlap(a, b)
-    ]

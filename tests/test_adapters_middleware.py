@@ -84,7 +84,7 @@ class Boom:
         raise OrderNotFound()
 
 
-def build(plane, *, authenticators=None, on_mismatch=None, reason=None):
+def build(plane, *, authenticators=None, on_mismatch=None, reason=None, credential=None):
     registry = PlaneRegistry()
     middleware = PlaneAuthenticationMiddleware(
         registry,
@@ -95,8 +95,8 @@ def build(plane, *, authenticators=None, on_mismatch=None, reason=None):
     app = falcon.asgi.App(middleware=[middleware])
     app.add_error_handler(OrderNotFound, render_not_found)
     app.add_error_handler(Unauthenticated, render_unauthenticated)
-    mount(registry, app, "/v1/thing", Echo(), plane=plane, reason=reason)
-    mount(registry, app, "/v1/boom", Boom(), plane=plane, reason=reason)
+    mount(registry, app, "/v1/thing", Echo(), plane=plane, reason=reason, credential=credential)
+    mount(registry, app, "/v1/boom", Boom(), plane=plane, reason=reason, credential=credential)
     return falcon.testing.TestClient(app), registry, app
 
 
@@ -186,23 +186,28 @@ def test_a_credential_this_host_cannot_verify_is_not_recognised_as_foreign():
     assert r.status_code == 401
 
 
-# ── the CALLBACK plane, which carries two methods ─────────────────────────────
+# ── the CALLBACK plane, which carries two methods; each route pins one ─────────
 
 
-def test_callback_accepts_either_of_its_two_methods():
-    client, _, _ = build(planes.CALLBACK)
-    by_hmac = client.simulate_get("/v1/thing", headers={HMAC_HEADER: "good"})
-    by_token = client.simulate_get("/v1/thing", headers={ONESHOT_HEADER: "good"})
-    assert by_hmac.json["method"] == "HMAC"
-    assert by_token.json["method"] == "ONE_SHOT_TOKEN"
+@pytest.mark.parametrize("pinned, header", [("HMAC", HMAC_HEADER), ("ONE_SHOT_TOKEN", ONESHOT_HEADER)])
+def test_a_callback_route_accepts_the_one_method_it_pins(pinned, header):
+    """C-060 §3: the plane holds two methods, a route declares one -- C-031 at route grain."""
+    client, _, _ = build(planes.CALLBACK, credential=pinned)
+    assert client.simulate_get("/v1/thing", headers={header: "good"}).json["method"] == pinned
 
 
-def test_an_invalid_callback_credential_does_not_fall_through_to_the_other():
-    """C-031 pins each SOURCE to one method. A source whose signature fails must not be waved
-    through because it also sent a token."""
-    client, _, _ = build(planes.CALLBACK)
-    r = client.simulate_get("/v1/thing", headers={HMAC_HEADER: "bad", ONESHOT_HEADER: "good"})
+def test_a_callback_route_refuses_the_method_it_did_not_pin():
+    """A source pinned to HMAC is not waved through because it also sent a token -- and the token
+    is not foreign either (same plane, and not I/O-free), so this is 401, not 404."""
+    client, _, _ = build(planes.CALLBACK, credential="HMAC")
+    r = client.simulate_get("/v1/thing", headers={ONESHOT_HEADER: "good"})
     assert r.status_code == 401
+
+
+def test_an_unpinned_callback_route_is_refused_it_would_accept_either():
+    client, _, _ = build(planes.CALLBACK)
+    r = client.simulate_get("/v1/thing", headers={HMAC_HEADER: "good"})
+    assert r.status_code == 500
 
 
 # ── the PUBLIC plane ──────────────────────────────────────────────────────────
