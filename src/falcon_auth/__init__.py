@@ -99,6 +99,7 @@ from .trustcontext import (
 )
 from .assurance import (
     BodyHasher,
+    raw_body_hash,
     HttpOperationVerifier,
     OperationBodyMismatch,
     OperationChallengeMiss,
@@ -141,6 +142,7 @@ __all__ = (
     "AuthzError",
     "AuthzUnavailable",
     "BodyHasher",
+    "raw_body_hash",
     "build_allow_list",
     "build_enforcer",
     "build_uvicorn_ssl_kwargs",

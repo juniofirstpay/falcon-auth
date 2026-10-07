@@ -39,7 +39,7 @@ from typing import Any, Awaitable, Callable
 import falcon
 import falcon.asgi
 
-from ..assurance.operation import BodyHasher, OperationVerifier, verify_operation
+from ..assurance.operation import BodyHasher, OperationVerifier, raw_body_hash, verify_operation
 from ..assurance.stepup import check_session_elevated
 from ..entitlement.enforcer import CapabilityEnforcer
 from ..entitlement.resolver import Resolver
@@ -47,6 +47,7 @@ from ..errors import CapabilityDenied, Unauthenticated
 from ..eastwest.errors import MissingCapabilityError
 from ..eastwest.verifier import Principal, Verifier
 from ..planes import SERVICE
+from .rawbody import raw_body
 from ..trustcontext import TrustContextClient
 
 
@@ -253,6 +254,7 @@ async def verify_operation_for(
     refs: RefExtractor,
     *,
     expected_purpose: str,
+    bind_body: bool = False,
     body_hash: BodyHasher | None = None,
     operation_header: str = DEFAULT_OPERATION_HEADER,
 ) -> Any:
@@ -282,18 +284,20 @@ async def verify_operation_for(
 
         # RESERVED: a genuine first execution, and the only branch that may spend a challenge.
         await verify_operation_for(
-            req, verifier, refs, expected_purpose="order_create", body_hash=quote_digest
+            req, verifier, refs, expected_purpose="order_create", bind_body=True
         )
         ...perform the write...
 
-    Reuse the fingerprint the idempotency reservation already computes rather than writing a
-    second canonicalizer: two definitions of "canonical" over one body will drift, and the day
-    they do, a body-bound challenge silently stops matching.
-
     :param expected_purpose: the purpose this route accepts, passed straight through. Required,
         with no default -- see :func:`~falcon_auth.assurance.operation.verify_operation`.
-    :param body_hash: this service's canonicalizer, taking the parsed media and returning the
-        hash to compare with the one the challenge was bound to.
+    :param bind_body: hash the request body as C-058 (`v28`) defines it -- base64url, unpadded,
+        SHA-256 over the exact bytes received, before any decode -- and compare it with the hash
+        the challenge was bound to. Needs the app wrapped in
+        :class:`~falcon_auth.adapters.rawbody.RawBodyBuffer`, which keeps those bytes; without
+        it this raises ``RuntimeError`` rather than compare against anything else.
+    :param body_hash: ⚠ deprecated -- a host hasher over the PARSED media. C-058 superseded the
+        canonicalized binding, and no hash of a parsed body can equal one over the client's
+        bytes. Warns; passing it with ``bind_body`` is refused.
 
     Raises `Unauthenticated` (no operation id), `OperationChallengeMiss` (run step-up again
     under a new id), `OperationPurposeMismatch` (a challenge for a different act),
@@ -307,11 +311,28 @@ async def verify_operation_for(
 
     session_ref, user_ref = refs(req)
 
+    if bind_body and body_hash is not None:
+        raise TypeError("pass bind_body=True or the deprecated body_hash=, not both")
+
     computed: str | None = None
-    if body_hash is not None:
-        # get_media(), NEVER stream.read(). Falcon caches the DESERIALIZED media, so a handler
-        # that already called get_media() shares this object and one that calls it afterwards
-        # still gets a body. Reading the stream would leave whichever runs second with b''.
+    if bind_body:
+        # The bytes RawBodyBuffer kept below Falcon -- never req.stream, which would leave a
+        # handler's later get_media() with b''.
+        body = raw_body(req.scope)
+        if body is None:
+            raise RuntimeError(
+                "bind_body=True needs the request's raw bytes, and none were kept: wrap the ASGI "
+                "app in falcon_auth.adapters.rawbody.RawBodyBuffer (C-058 hashes the exact bytes "
+                "received, which a parsed body cannot reproduce)"
+            )
+        computed = raw_body_hash(body)
+    elif body_hash is not None:
+        warnings.warn(
+            "verify_operation_for(body_hash=...) hashes the parsed body, which C-058 superseded; "
+            "wrap the app in RawBodyBuffer and pass bind_body=True",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         computed = body_hash(await req.get_media())
 
     return await verify_operation(
