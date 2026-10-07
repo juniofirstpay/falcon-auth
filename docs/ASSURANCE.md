@@ -215,8 +215,8 @@ an *act* — so one step-up would authorize every write until it expires. That i
 version of the same control; it is a different one.
 
 See [`OPERATION-STEPUP.md`](OPERATION-STEPUP.md) for the per-operation mechanism: what it
-consumes, why the idempotency lookup must run before it, and why the hook reads the body with
-`get_media()` and never `stream.read()`.
+consumes, why the idempotency lookup must run before it, and why the body is hashed as raw bytes
+kept below Falcon (C-058).
 
 ---
 

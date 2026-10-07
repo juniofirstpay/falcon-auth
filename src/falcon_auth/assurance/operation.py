@@ -46,6 +46,8 @@ authorizes a body that moves 50000.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -60,6 +62,7 @@ logger = get_logger(__name__)
 __all__ = (
     "AUTH_CODE_OPERATION_MISS",
     "BodyHasher",
+    "raw_body_hash",
     "HttpOperationVerifier",
     "OperationBodyMismatch",
     "OperationChallengeMiss",
@@ -226,13 +229,21 @@ def _check_body(
         )
 
 
-#: A host-supplied canonicalizer: parsed request body in, hash string out.
-#:
-#: The package cannot write this. Canonicalizing means turning a body into one predictable
-#: string so the same logical request always hashes the same way -- which field order, which
-#: number formatting, which fields count at all. Those are schema questions and the schema is
-#: the consumer's.
+#: A host-supplied hasher over the PARSED body -- ⚠ deprecated. C-058 (`v28`) superseded C-030's
+#: canonicalization: the binding is over the raw bytes, which a parsed body cannot reproduce. Use
+#: :func:`raw_body_hash` through ``verify_operation_for(..., bind_body=True)``.
 BodyHasher = Callable[[Any], str]
+
+
+def raw_body_hash(body: bytes) -> str:
+    """``request_body_hash`` as C-058 §2 defines it: base64url, unpadded, of SHA-256 over the
+    exact bytes of the request body -- no parse, no canonicalization.
+
+    Both ends compute it this way: the client over the final bytes it sends (C-058 §3), and the
+    consuming service over the bytes as received, before any decode (§4).
+    """
+    digest = hashlib.sha256(body).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 # -- the HTTP client ------------------------------------------------------------------------
