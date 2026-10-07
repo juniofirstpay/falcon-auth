@@ -2,9 +2,11 @@
 
 Every condition here is a COMMON one, with a platform register row (C-008, C-043), so each class
 names its row (`plat_code`, :mod:`falcon_auth.wire`) and
-`falcon_auth.adapters.errors.register_platform_error_handlers` renders them in C-001's shape --
-`{code, message, extras?}` -- with the register's copy and the exception's own text as a log-only
-trace (C-048). A host that keeps its own handlers maps them by the table below.
+`falcon_auth.adapters.errors.register_falcon_auth_error_handler` renders them in C-001's shape --
+`{code, message, extras?}`, the same shape the host renders its own errors in -- with the
+register's copy and the exception's own text as a log-only trace (C-048). It renders falcon-auth's
+errors only. A host that keeps a single handler of its own maps them by the table below, or
+delegates to `render_falcon_auth_error`.
 
 This lives at the package root rather than inside `entitlement/` because `trustcontext` raises
 two of them, and `SessionMiss` subclasses `CapabilityDenied` -- a relationship the docstring
@@ -53,7 +55,7 @@ be woken up to.
 """
 from typing import Any, ClassVar
 
-from .wire import PlatformError
+from .wire import FalconAuthError
 
 __all__ = (
     "AuthzError",
@@ -66,11 +68,11 @@ __all__ = (
 )
 
 
-class AuthzError(PlatformError):
+class AuthzError(FalconAuthError):
     """Base of the user-plane and assurance failures this package raises.
 
     Each subclass names its platform register row (:attr:`plat_code`, C-008), so
-    :func:`falcon_auth.adapters.errors.register_platform_error_handlers` renders every one of them
+    :func:`falcon_auth.adapters.errors.register_falcon_auth_error_handler` renders every one of them
     in C-001's shape. ``description`` is the operator's text: the log-only ``trace`` (C-048 §2),
     never the customer ``message``.
     """

@@ -45,7 +45,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from ..wire import PlatformError
+from ..wire import FalconAuthError
 
 
 _DEFAULT_MISSING_CERT_CODE = 9000
@@ -117,12 +117,12 @@ class SvcPlaneErrorCodes:
 # property the README states and ``tests/test_no_framework_leak.py`` now enforces.
 
 
-class SvcPlaneError(PlatformError):
+class SvcPlaneError(FalconAuthError):
     """Base for the three fail-closed east-west errors.
 
     Two renderings. :meth:`json` is the pre-C-001 shape (``{code:int, title, description}``),
     kept for :func:`~falcon_auth.adapters.errors.register_error_handlers`, which is deprecated.
-    Through :func:`~falcon_auth.adapters.errors.register_platform_error_handlers` each subclass
+    Through :func:`~falcon_auth.adapters.errors.register_falcon_auth_error_handler` each subclass
     renders as its PLAT row (C-001, C-008) -- the numeric :attr:`code` is then not used.
 
     Subclasses set :attr:`title`, :attr:`http_status`, and :attr:`description`

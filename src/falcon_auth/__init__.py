@@ -75,7 +75,7 @@ from .eastwest import (
     build_uvicorn_ssl_kwargs,
     peer_cn,
 )
-from .wire import PLAT_CODES, PlatformError, envelope
+from .wire import PLAT_CODES, FalconAuthError, envelope
 from .errors import (
     AuthzError,
     AuthzUnavailable,
@@ -203,7 +203,7 @@ __all__ = (
     "StepUpRequired",
     "TokenExpired",
     "PLAT_CODES",
-    "PlatformError",
+    "FalconAuthError",
     "envelope",
     "SvcPlaneError",
     "SvcPlaneErrorCodes",

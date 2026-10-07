@@ -1,25 +1,28 @@
-"""The platform error envelope (C-001) for every failure this package raises.
+"""The JSON shape of the errors falcon-auth raises: C-001's, the same as the host's.
 
-C-001 fixes one error shape for every service, on every plane, for every error -- framework
-ones included::
+falcon-auth renders **only its own errors** -- the exceptions raised from inside the package. The
+host's domain errors, Falcon's framework errors (router 404, 405) and anything unhandled are the
+host's, rendered by the host's own serializer from its own register (C-001: each service keeps
+one). What falcon-auth guarantees is that its errors come out in the **same shape** as the
+host's, so a client cannot tell which layer answered::
 
-    {"code": "PLAT0102", "message": "You do not have access to this.", "extras": {...}}
+    {"code": "PLAT0102", "message": "You do not have access to this.", "extras": {"capability": "kyc:read"}}
 
-    code      ^[A-Z]{4}[0-9]{4}$, estate-unique. Every condition this package raises is a COMMON
-              one, so its code is a PLAT code (C-008), and only a PLAT code (C-043)
-    message   customer copy, taken from the register by code -- ⛔ never written at a raise site
-              (C-048 §1)
-    extras    optional, dynamic: values the caller may see. Debug detail is NOT here: it rides a
-              log-only `trace` (C-048 §2) and never reaches the wire
+    code      ^[A-Z]{4}[0-9]{4}$. Every condition this package raises is a COMMON one, so its code
+              is a PLAT code (C-008), and only a PLAT code (C-043)
+    message   customer copy, from the register by code -- ⛔ never written at a raise site (C-048 §1)
+    extras    optional: values the caller may see. Debug detail is a log-only `trace` (C-048 §2)
+
+One consequence worth stating: the plane middleware's wrong-plane answer is NOT one of these. It
+raises Falcon's own ``HTTPRouteNotFound``, so the host's router-miss handler renders it as
+``PLAT0006`` -- which is exactly what makes it byte-identical to a real router miss (RUL-158).
 
 WHY THE COPY IS IN THE PACKAGE. The register lives in platform-conventions (`registry/PLAT.md`);
 the language package that would carry it is deferred (C-043, "for now"). So the rows this package
-emits are copied below **verbatim**, with the register as their source -- the same choice made for
-the Casbin model text. A host with its own copy of the register passes ``messages=`` to the
-handler mounting and that wins. A divergence from the register is a bug here, visible in review.
+emits are copied below **verbatim** -- the same choice made for the Casbin model text. A host with
+its own copy passes ``messages=`` and that wins.
 
-This module is framework-free. The Falcon handlers that serialize it are in
-:mod:`falcon_auth.adapters.errors`.
+Framework-free. The Falcon handler is :func:`falcon_auth.adapters.errors.register_falcon_auth_error_handler`.
 """
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ __all__ = (
     "PLAT_CODES",
     "MessageLookup",
     "PlatCode",
-    "PlatformError",
+    "FalconAuthError",
     "envelope",
 )
 
@@ -46,23 +49,11 @@ class PlatCode:
     message: str
 
 
-#: The PLAT rows this package can emit, copied VERBATIM from platform-conventions
-#: `registry/PLAT.md` (C-008, C-043; RUL-086, RUL-133, RUL-158).
+#: The PLAT rows falcon-auth's own errors use, copied VERBATIM from platform-conventions
+#: `registry/PLAT.md` (C-008, C-043; RUL-086, RUL-133).
 PLAT_CODES: Mapping[str, PlatCode] = {
     row.code: row
     for row in (
-        PlatCode("PLAT0001", "invalid_request", 400, "The request could not be processed."),
-        PlatCode("PLAT0004", "unsupported_media_type", 415, "The request could not be processed."),
-        PlatCode("PLAT0005", "payload_too_large", 413, "The request is too large."),
-        PlatCode("PLAT0006", "route_not_found", 404, "The requested resource was not found."),
-        PlatCode("PLAT0007", "method_not_allowed", 405, "This action is not allowed."),
-        PlatCode("PLAT0008", "resource_not_found", 404, "The requested item was not found."),
-        PlatCode("PLAT0010", "conflict", 409,
-                 "This action conflicts with the current state. Please refresh and try again."),
-        PlatCode("PLAT0014", "precondition_failed", 412,
-                 "This item changed since you last viewed it. Please refresh and try again."),
-        PlatCode("PLAT0015", "precondition_required", 428,
-                 "The request could not be processed. Please refresh and try again."),
         PlatCode("PLAT0101", "unauthenticated", 401, "Please sign in again."),
         PlatCode("PLAT0102", "forbidden", 403, "You do not have access to this."),
         PlatCode("PLAT0103", "client_certificate_missing", 401,
@@ -84,8 +75,8 @@ PLAT_CODES: Mapping[str, PlatCode] = {
 MessageLookup = Callable[[str], "str | None"]
 
 
-class PlatformError(Exception):
-    """The mixin every exception this package raises carries: which PLAT row it is.
+class FalconAuthError(Exception):
+    """The base every exception falcon-auth raises carries: which PLAT row it is.
 
     Subclasses set :attr:`plat_code`. What reaches the wire is the row's status and message, plus
     :meth:`wire_extras`. Everything else about the exception -- its text, its own attributes -- is
@@ -95,7 +86,7 @@ class PlatformError(Exception):
     :class:`~falcon_auth.errors.AuthzError` and :class:`~falcon_auth.eastwest.errors.SvcPlaneError`.
     """
 
-    #: The register row. Unhandled conditions are PLAT0301.
+    #: The register row. A subclass that names none is an internal fault, PLAT0301.
     plat_code: ClassVar[str] = "PLAT0301"
 
     def wire_extras(self) -> dict[str, Any]:

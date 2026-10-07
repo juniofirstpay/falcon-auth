@@ -1,8 +1,9 @@
-"""falcon-auth#1 A8: every error in C-001's shape, ``{code, message, extras?}``.
+"""falcon-auth#1 A8: falcon-auth's own errors, in C-001's shape ``{code, message, extras?}``.
 
-Each package exception names its platform register row; the handlers render it with the
+falcon-auth registers ONE handler, for its own error base, and renders each of its errors with the
 register's message (C-048 §1), the caller-safe extras only, and the exception's own text as a
-log-only trace (C-048 §2). Framework errors render the same way (C-001: "every" includes them).
+log-only trace (C-048 §2) -- the same JSON shape the host renders its own errors in. It registers
+nothing else: the host's errors, framework ones and unhandled ones stay the host's.
 """
 from __future__ import annotations
 
@@ -21,7 +22,8 @@ from falcon_auth.adapters import (
     PlaneRegistry,
     mount,
     register_error_handlers,
-    register_platform_error_handlers,
+    register_falcon_auth_error_handler,
+    render_falcon_auth_error,
 )
 from falcon_auth.adapters.authenticators import CustomAuthenticator, JWTAuthenticator, Selector
 from falcon_auth.assurance.operation import (
@@ -53,11 +55,8 @@ def _app(raise_this=None, **register_kwargs):
         async def on_get(self, req, resp):
             raise raise_this
 
-        async def on_post(self, req, resp):
-            await req.get_media()
-
     app = falcon.asgi.App()
-    register_platform_error_handlers(app, **register_kwargs)
+    register_falcon_auth_error_handler(app, **register_kwargs)
     app.add_route("/x", Raises())
     return app
 
@@ -154,7 +153,7 @@ def test_the_operators_text_never_reaches_the_wire_and_is_logged():
     with capture_logs() as logs:
         r = _get(CapabilityDenied("SECRET internal detail 42", capability="kyc:read"))
     assert "SECRET" not in r.text
-    line = next(e for e in logs if e["event"] == "error_response")
+    line = next(e for e in logs if e["event"] == "falcon_auth_error")
     assert "SECRET internal detail 42" in line["trace"]
     assert line["code"] == "PLAT0102" and line["path"] == "/x" and line["method"] == "GET"
 
@@ -163,7 +162,7 @@ def test_an_unknown_cn_is_logged_not_echoed():
     with capture_logs() as logs:
         r = _get(UnknownCNError(cn="stranger.internal"))
     assert "stranger" not in r.text
-    assert "stranger.internal" in next(e for e in logs if e["event"] == "error_response")["trace"]
+    assert "stranger.internal" in next(e for e in logs if e["event"] == "falcon_auth_error")["trace"]
 
 
 def test_a_host_register_overrides_the_copy():
@@ -171,59 +170,66 @@ def test_a_host_register_overrides_the_copy():
     assert r.json == {"code": "PLAT0101", "message": "Sign in."}
 
 
-# ─── framework errors (C-001: "every" includes them) ─────────────────────────
+# ─── nothing but falcon-auth's own errors ────────────────────────────────────
 
 
-def test_a_router_miss_is_plat0006():
+def test_it_does_not_take_over_the_hosts_framework_errors():
+    """A router miss is the host's to render: falcon-auth leaves Falcon's own default in place."""
     r = falcon.testing.TestClient(_app()).simulate_get("/nowhere")
-    _assert_c001(r, 404, "PLAT0006")
+    assert r.status_code == 404 and "code" not in (r.json or {})
 
 
-def test_a_wrong_method_is_plat0007_and_keeps_allow():
-    r = falcon.testing.TestClient(_app()).simulate_delete("/x")
-    _assert_c001(r, 405, "PLAT0007")
-    assert "GET" in r.headers["Allow"]
-
-
-def test_malformed_media_is_plat0001():
-    r = falcon.testing.TestClient(_app()).simulate_post(
-        "/x", body=b"{not json", headers={"Content-Type": "application/json"})
-    _assert_c001(r, 400, "PLAT0001")
-
-
-def test_a_host_http_error_maps_by_status():
-    _assert_c001(_get(falcon.HTTPConflict()), 409, "PLAT0010")
-
-
-def test_an_unmapped_status_keeps_its_status_and_is_logged():
-    with capture_logs() as logs:
-        r = _get(falcon.HTTPError(falcon.HTTP_418))
-    assert r.status_code == 418 and r.json["code"] == "PLAT0301"
-    assert any(e["event"] == "http_error_unmapped" for e in logs)
-
-
-def test_anything_unhandled_is_plat0301():
-    with capture_logs():
-        _assert_c001(_get(RuntimeError("boom")), 500, "PLAT0301")
-
-
-def test_unhandled_can_be_left_to_the_host():
-    r = _get(RuntimeError("boom"), unhandled=False)
+def test_it_does_not_take_over_unhandled_exceptions():
+    r = _get(RuntimeError("boom"))
     assert r.status_code == 500 and "code" not in (r.json or {})
 
 
-# ─── the wrong-plane answer, end to end ──────────────────────────────────────
+def test_it_does_not_take_over_a_hosts_http_error():
+    r = _get(falcon.HTTPConflict())
+    assert r.status_code == 409 and "code" not in (r.json or {})
 
 
-def test_the_wrong_plane_answer_is_byte_identical_to_a_router_miss():
-    """RUL-158, through the real middleware and these handlers."""
+def test_a_host_with_one_handler_of_its_own_can_delegate():
+    app = falcon.asgi.App()
+
+    async def host_handler(req, resp, ex, params):
+        if isinstance(ex, CapabilityDenied):
+            render_falcon_auth_error(req, resp, ex)
+        else:
+            resp.status, resp.media = falcon.HTTP_400, {"code": "PRSN0001", "message": "Bad."}
+
+    app.add_error_handler(Exception, host_handler)
+
+    class R:
+        async def on_get(self, req, resp):
+            raise CapabilityDenied(capability="kyc:read")
+
+    app.add_route("/x", R())
+    with capture_logs():
+        r = falcon.testing.TestClient(app).simulate_get("/x")
+    _assert_c001(r, 403, "PLAT0102", {"capability": "kyc:read"})
+
+
+# ─── the wrong-plane answer: the host's router miss, the same shape ──────────
+
+
+def test_the_wrong_plane_answer_is_the_hosts_router_miss_byte_for_byte():
+    """RUL-158. The middleware raises Falcon's HTTPRouteNotFound, so the HOST's router-miss
+    handler renders it -- and falcon-auth's own errors come out in the same shape beside it."""
 
     def fake(name, header, plane, method):
         async def attempt(req):
-            return f"{name}-principal" if req.get_header(header) else None
+            value = req.get_header(header)
+            if value == "bad":
+                raise Unauthenticated(f"invalid {name}")
+            return f"{name}-principal" if value else None
 
         return CustomAuthenticator(attempt, plane=plane, method=method,
                                    selector=Selector(header))
+
+    async def host_router_miss(req, resp, ex, params):     # the host's own C-001 serializer
+        resp.status, resp.media = falcon.HTTP_404, {
+            "code": "PLAT0006", "message": "The requested resource was not found."}
 
     registry = PlaneRegistry()
     mw = PlaneAuthenticationMiddleware(registry, authenticators={
@@ -231,7 +237,8 @@ def test_the_wrong_plane_answer_is_byte_identical_to_a_router_miss():
         "mtls": fake("mtls", "X-Client-Cert", planes.SERVICE, planes.MTLS),
     })
     app = falcon.asgi.App(middleware=[mw])
-    register_platform_error_handlers(app)
+    register_falcon_auth_error_handler(app)
+    app.add_error_handler(falcon.HTTPRouteNotFound, host_router_miss)
 
     class Orders:
         async def on_get(self, req, resp):
@@ -242,8 +249,10 @@ def test_the_wrong_plane_answer_is_byte_identical_to_a_router_miss():
     with capture_logs():
         wrong_plane = client.simulate_get("/v1/orders", headers={"X-Client-Cert": "payments"})
         router_miss = client.simulate_get("/v1/nowhere")
+        forged = client.simulate_get("/v1/orders", headers={"Authorization": "bad"})
     assert wrong_plane.content == router_miss.content
-    _assert_c001(wrong_plane, 404, "PLAT0006")
+    assert set(wrong_plane.json) == set(forged.json) == {"code", "message"}
+    _assert_c001(forged, 401, "PLAT0101")
 
 
 # ─── overriding and the old shape ────────────────────────────────────────────
@@ -262,7 +271,7 @@ def test_a_host_handler_registered_after_wins():
 
 def test_the_pre_c001_registration_is_deprecated_and_unchanged():
     app = falcon.asgi.App()
-    with pytest.warns(DeprecationWarning, match="register_platform_error_handlers"):
+    with pytest.warns(DeprecationWarning, match="register_falcon_auth_error_handler"):
         register_error_handlers(app)
 
     class R:

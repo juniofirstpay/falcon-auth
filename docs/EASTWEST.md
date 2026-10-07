@@ -133,9 +133,10 @@ known CN lacking the capability is an **authorization** one. Collapsing them wou
 service and an under-privileged one look identical in the logs, and those have very different
 fixes.
 
-Through `register_platform_error_handlers(app)` all three render in C-001's shape,
-`{code, message, extras?}`, with the codes above — the same shape as every other error the package
-raises and every framework error (falcon-auth#1 A8). The CN is logged, never echoed.
+Through `register_falcon_auth_error_handler(app)` all three render in C-001's shape,
+`{code, message, extras?}`, with the codes above — like every other error falcon-auth raises, and the
+same shape the host renders its own errors in (falcon-auth#1 A8). The handler covers falcon-auth's
+errors only; the host's are the host's. The CN is logged, never echoed.
 
 The pre-C-001 shape, `{code: 9000-9002, title, description}` (with `title: "MissingScopeError"` and
 `extras.scope` for the third), is what the deprecated `register_error_handlers` still emits, for a
