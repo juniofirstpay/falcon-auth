@@ -168,6 +168,7 @@ async def test_require_callback_401s_when_no_client_cert():
 
 
 async def test_render_writes_status_and_media_from_exception():
+    """C-001 by default (RUL-161): an unknown CN is 403 PLAT0104, and the CN is not echoed."""
     ex = UnknownCNError(cn="stranger.svc")
     resp = MagicMock()
     resp.status = None
@@ -176,7 +177,7 @@ async def test_render_writes_status_and_media_from_exception():
     await render_svcplane_error(MagicMock(), resp, ex, {})
 
     assert resp.status == falcon.HTTP_403
-    assert resp.media == ex.json()
+    assert resp.media == {"code": "PLAT0104", "message": "The request could not be authorised."}
 
 
 def test_register_error_handlers_binds_svcplane_error_base_class():

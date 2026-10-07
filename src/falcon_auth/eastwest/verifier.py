@@ -308,6 +308,14 @@ class Verifier:
         allow: AllowList,
         codes: SvcPlaneErrorCodes | None = None,
     ):
+        if codes is not None:
+            warnings.warn(
+                "Verifier(codes=SvcPlaneErrorCodes(...)) is deprecated: the numeric codes belong "
+                "to the pre-C-001 east-west shape. falcon-auth's errors render PLAT codes by "
+                "default (RUL-161), and PLAT codes are not the consumer's to choose",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._allow = allow
         self._codes = codes or SvcPlaneErrorCodes()
 
