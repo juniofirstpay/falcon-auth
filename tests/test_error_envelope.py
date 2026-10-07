@@ -269,10 +269,76 @@ def test_a_host_handler_registered_after_wins():
     assert falcon.testing.TestClient(app).simulate_get("/x").json["code"] == "PRSN0042"
 
 
-def test_the_pre_c001_registration_is_deprecated_and_unchanged():
+# ─── RUL-161: on by default; the old shape is an explicit, recorded exception ─
+
+
+def _registered(**kw):
     app = falcon.asgi.App()
-    with pytest.warns(DeprecationWarning, match="register_falcon_auth_error_handler"):
-        register_error_handlers(app)
+    register_error_handlers(app, **kw)
+
+    class R:
+        async def on_get(self, req, resp):
+            raise req.context.raise_this
+
+    async def set_raise(req, resp, resource, params):
+        req.context.raise_this = _registered.ex
+
+    app.add_route("/x", falcon.before(set_raise)(R)())
+    return falcon.testing.TestClient(app)
+
+
+@pytest.mark.parametrize(
+    "ex, status, code, extras",
+    [
+        (MissingClientCertError(), 401, "PLAT0103", None),
+        (UnknownCNError(cn="s.internal"), 403, "PLAT0104", None),
+        (MissingCapabilityError("kyc:read"), 403, "PLAT0102", {"capability": "kyc:read"}),
+        (CapabilityDenied(capability="a:b"), 403, "PLAT0102", {"capability": "a:b"}),
+        (StepUpRequired(required=2), 401, "PLAT0109", {"required_session_trust_level": 2}),
+    ],
+    ids=lambda v: type(v).__name__ if isinstance(v, Exception) else None,
+)
+def test_the_call_hosts_already_make_now_renders_c001(ex, status, code, extras):
+    """RUL-160/161: east-west included, by default, with no new call in the host."""
+    _registered.ex = ex
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")       # the default path warns about nothing
+        with capture_logs():
+            _assert_c001(_registered().simulate_get("/x"), status, code, extras)
+
+
+def test_render_svcplane_error_registered_by_the_host_renders_c001():
+    """persona registers this itself; it gets the new shape without a code change."""
+    from falcon_auth.adapters import render_svcplane_error
+    from falcon_auth.eastwest.errors import SvcPlaneError
+
+    app = falcon.asgi.App()
+    app.add_error_handler(SvcPlaneError, render_svcplane_error)
+
+    class R:
+        async def on_get(self, req, resp):
+            raise MissingCapabilityError("kyc:write")
+
+    app.add_route("/x", R())
+    with capture_logs():
+        _assert_c001(falcon.testing.TestClient(app).simulate_get("/x"), 403, "PLAT0102",
+                     {"capability": "kyc:write"})
+
+
+def test_numeric_code_overrides_are_deprecated():
+    from falcon_auth import SvcPlaneErrorCodes, Verifier
+
+    with pytest.warns(DeprecationWarning, match="RUL-161"):
+        Verifier({}, codes=SvcPlaneErrorCodes(missing_cert=5000))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        Verifier({})
+
+
+def test_the_pre_c001_shape_is_an_explicit_recorded_exception():
+    app = falcon.asgi.App()
+    with pytest.warns(DeprecationWarning, match="C-001 exception"):
+        register_error_handlers(app, legacy_shape=True)
 
     class R:
         async def on_get(self, req, resp):

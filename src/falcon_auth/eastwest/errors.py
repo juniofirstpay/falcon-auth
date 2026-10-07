@@ -120,10 +120,10 @@ class SvcPlaneErrorCodes:
 class SvcPlaneError(FalconAuthError):
     """Base for the three fail-closed east-west errors.
 
-    Two renderings. :meth:`json` is the pre-C-001 shape (``{code:int, title, description}``),
-    kept for :func:`~falcon_auth.adapters.errors.register_error_handlers`, which is deprecated.
-    Through :func:`~falcon_auth.adapters.errors.register_falcon_auth_error_handler` each subclass
-    renders as its PLAT row (C-001, C-008) -- the numeric :attr:`code` is then not used.
+    Two renderings. By default (RUL-161) each subclass renders as its PLAT row, in C-001's shape
+    (:func:`~falcon_auth.adapters.errors.register_error_handlers`). :meth:`json` is the pre-C-001
+    body (``{code:int, title, description}``), used only under ``legacy_shape=True`` -- a C-001
+    exception the consumer records. The numeric :attr:`code` matters only there.
 
     Subclasses set :attr:`title`, :attr:`http_status`, and :attr:`description`
     at class level (hardened by the package). Only :attr:`code` and
