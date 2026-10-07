@@ -1,9 +1,12 @@
 """The failures this package raises — deliberately NOT HTTP errors.
 
-This package cannot depend on a host service's error catalog: orders renders `{code, label, title,
-description, extras}` (`app/error/errors.py`), a peer may render RFC 7807, and neither shape belongs
-in a reusable gate. So the package raises its own small hierarchy and the host maps it once, at
-`register_error_handlers`, into whatever it already puts on the wire.
+Every condition here is a COMMON one, with a platform register row (C-008, C-043), so each class
+names its row (`plat_code`, :mod:`falcon_auth.wire`) and
+`falcon_auth.adapters.errors.register_falcon_auth_error_handler` renders them in C-001's shape --
+`{code, message, extras?}`, the same shape the host renders its own errors in -- with the
+register's copy and the exception's own text as a log-only trace (C-048). It renders falcon-auth's
+errors only. A host that keeps a single handler of its own maps them by the table below, or
+delegates to `render_falcon_auth_error`.
 
 This lives at the package root rather than inside `entitlement/` because `trustcontext` raises
 two of them, and `SessionMiss` subclasses `CapabilityDenied` -- a relationship the docstring
@@ -50,7 +53,9 @@ certificate lacks the `trust:read` scope -- a deployment fault. Surfacing it as 
 turn a misconfigured rollout into "every user suddenly lacks permissions", which is the wrong page to
 be woken up to.
 """
-from typing import Any
+from typing import Any, ClassVar
+
+from .wire import FalconAuthError
 
 __all__ = (
     "AuthzError",
@@ -58,25 +63,53 @@ __all__ = (
     "CapabilityDenied",
     "SessionMiss",
     "StepUpRequired",
+    "TokenExpired",
     "Unauthenticated",
 )
 
 
-class AuthzError(Exception):
-    """Base of every failure this package raises. Hosts may map this alone as a catch-all 403."""
+class AuthzError(FalconAuthError):
+    """Base of the user-plane and assurance failures this package raises.
+
+    Each subclass names its platform register row (:attr:`plat_code`, C-008), so
+    :func:`falcon_auth.adapters.errors.register_falcon_auth_error_handler` renders every one of them
+    in C-001's shape. ``description`` is the operator's text: the log-only ``trace`` (C-048 §2),
+    never the customer ``message``.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0301"
 
     def __init__(self, description: str | None = None, **extras: Any) -> None:
         self.description = description or self.__class__.__doc__ or self.__class__.__name__
         self.extras = extras
         super().__init__(self.description)
 
+    def trace(self) -> str:
+        return self.description
+
 
 class Unauthenticated(AuthzError):
     """No verified principal on the request."""
 
+    plat_code: ClassVar[str] = "PLAT0101"
+
+
+class TokenExpired(Unauthenticated):
+    """The token is well-formed and signed, but past ``exp``.
+
+    Its own row because the client's recovery differs: ``PLAT0108`` means **refresh** the token
+    and retry; ``PLAT0101`` means sign in again (RUL-072: resource services verify locally, so
+    they are the ones who can tell). A subclass, so a host catching ``Unauthenticated`` still
+    catches it.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0108"
+
 
 class CapabilityDenied(AuthzError):
     """The principal does not hold an entitlement granting this capability."""
+
+    plat_code: ClassVar[str] = "PLAT0102"
 
     def __init__(
         self, description: str | None = None, *, capability: str | None = None, **extras: Any
@@ -86,13 +119,25 @@ class CapabilityDenied(AuthzError):
             extras.setdefault("capability", capability)
         super().__init__(description, **extras)
 
+    def wire_extras(self) -> dict[str, Any]:
+        # C-055: the missing capability rides `extras.capability`, on both planes.
+        return {"capability": self.capability} if self.capability is not None else {}
+
 
 class SessionMiss(CapabilityDenied):
     """The session is dead, unknown, or not owned by the asserted subject."""
 
+    plat_code: ClassVar[str] = "PLAT0106"
+
+    def wire_extras(self) -> dict[str, Any]:
+        # A dead session is not about a capability; naming one would mislead the client.
+        return {}
+
 
 class AuthzUnavailable(AuthzError):
     """Authorization state could not be established -- the trust source is unreachable or misconfigured."""
+
+    plat_code: ClassVar[str] = "PLAT0302"
 
 
 class StepUpRequired(AuthzError):
@@ -126,3 +171,13 @@ class StepUpRequired(AuthzError):
         if present is not None:
             extras.setdefault("session_trust_level", present)
         super().__init__(description, **extras)
+
+    plat_code: ClassVar[str] = "PLAT0109"
+
+    def wire_extras(self) -> dict[str, Any]:
+        # Which challenge to raise -- the client needs it, and it reveals nothing it lacks.
+        return {
+            k: self.extras[k]
+            for k in ("required_session_trust_level", "session_trust_level")
+            if k in self.extras
+        }

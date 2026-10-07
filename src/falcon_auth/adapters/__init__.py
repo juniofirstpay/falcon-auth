@@ -28,7 +28,9 @@ Modules:
     hooks.py            require (entitlement) · require_elevated (assurance)
                         require_service_capability · require_callback (east-west)
                         principal_from_request
-    errors.py           register_error_handlers · render_svcplane_error
+    errors.py           register_falcon_auth_error_handler -- falcon-auth's OWN errors, in
+                        C-001's shape, the same as the host's ·
+                        register_error_handlers (deprecated, pre-C-001)
     authenticators.py   RemoteJWKSAuthenticator (boolean, for Authentication) ·
                         JWTAuthenticator / ReferenceAuthenticator / MTLSAuthenticator /
                         CustomAuthenticator (tri-state, for the plane middleware) --
@@ -61,7 +63,12 @@ from .authenticators import (
     jwt_authenticator,
     mtls_authenticator,
 )
-from .errors import register_error_handlers, render_svcplane_error
+from .errors import (
+    register_error_handlers,
+    register_falcon_auth_error_handler,
+    render_falcon_auth_error,
+    render_svcplane_error,
+)
 from .middleware import (
     AUTH_CREDENTIAL_ATTR,
     AUTH_METHOD_ATTR,
@@ -114,6 +121,8 @@ __all__ = (
     "principal_from_request",
     "RefExtractor",
     "register_error_handlers",
+    "register_falcon_auth_error_handler",
+    "render_falcon_auth_error",
     "Registration",
     "RemoteJWKSAuthenticator",
     "jwt_authenticator",

@@ -122,23 +122,26 @@ peer backend opens a connection
 
 ## The three refusals
 
-| What happened | Error | Status | Why that status |
+| What happened | Error | Wire (C-001) | Why that status |
 |---|---|---|---|
-| No client certificate | `MissingClientCertError` | **401** | a failed *credential* — we do not know who you are |
-| CN not on the allow-list | `UnknownCNError` | **403** | we know who you are; you are not on the list |
-| On the list, lacks the capability | `MissingCapabilityError` | **403** | we know who you are; you may not do *this* |
+| No client certificate | `MissingClientCertError` | **401 `PLAT0103`** | a failed *credential* — we do not know who you are |
+| CN not on the allow-list | `UnknownCNError` | **403 `PLAT0104`** | we know who you are; you are not on the list |
+| On the list, lacks the capability | `MissingCapabilityError` | **403 `PLAT0102`**, `extras.capability` | we know who you are; you may not do *this* |
 
 The 401/403 split is deliberate (C-018). A failed credential is an **authentication** problem; a
 known CN lacking the capability is an **authorization** one. Collapsing them would make an unreachable
 service and an under-privileged one look identical in the logs, and those have very different
 fixes.
 
-All three render as `{code, title, description}` — the same envelope every consuming service
-already emits. `MissingCapabilityError` still renders with `title: "MissingScopeError"` and
-`extras.scope`: the wire changes only when C-055 is ratified and the envelope work in
-falcon-auth#1 A8 lands (`PLAT0105` folds into `PLAT0102`). `MissingScopeError` is the same class,
-so an existing `except` keeps working. Only the numeric `code` is overridable, via `SvcPlaneErrorCodes`, for a consumer
-whose 9xxx range is already spoken for.
+Through `register_falcon_auth_error_handler(app)` all three render in C-001's shape,
+`{code, message, extras?}`, with the codes above — like every other error falcon-auth raises, and the
+same shape the host renders its own errors in (falcon-auth#1 A8). The handler covers falcon-auth's
+errors only; the host's are the host's. The CN is logged, never echoed.
+
+The pre-C-001 shape, `{code: 9000-9002, title, description}` (with `title: "MissingScopeError"` and
+`extras.scope` for the third), is what the deprecated `register_error_handlers` still emits, for a
+consumer whose peers have not switched yet. `MissingScopeError` is the same class as
+`MissingCapabilityError`, so an existing `except` keeps working.
 
 ---
 
