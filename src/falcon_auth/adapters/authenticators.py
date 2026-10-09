@@ -38,7 +38,7 @@ import structlog
 
 from ..errors import AuthzUnavailable, TokenExpired, Unauthenticated
 from ..eastwest.verifier import Verifier, peer_cn
-from ..identity.jwks import InvalidToken, JWKSVerifier
+from ..identity.jwks import EXPIRED, InvalidToken, JWKSVerifier
 from ..planes import (
     JWT,
     MTLS,
@@ -53,8 +53,10 @@ from ..planes import (
 
 logger = structlog.get_logger("falcon_auth.adapters")
 
-#: The `InvalidToken.reason` JWKSVerifier gives an expired token (PyJWT's exception name).
-_EXPIRED = "ExpiredSignatureError"
+#: `InvalidToken.reason` for "ours, and only stale" -- see `falcon_auth.identity.jwks.EXPIRED`.
+#: JWKSVerifier gives it ONLY when signature, issuer and audience pass (RUL-175 ②); a host
+#: verifier passed to JWTAuthenticator must honour the same contract.
+_EXPIRED = EXPIRED
 
 
 class RemoteJWKSAuthenticator:

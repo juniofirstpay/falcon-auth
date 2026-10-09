@@ -119,9 +119,10 @@ def register_falcon_auth_error_handler(
     for :class:`~falcon_auth.wire.FalconAuthError` and every subclass. Nothing else is
     registered: the host's own errors stay the host's.
 
-    :param messages: the host's register, ``code -> message`` (or ``None`` to use the copy in
-        :data:`falcon_auth.wire.PLAT_CODES`). Pass the same lookup the host's own serializer uses,
-        and the two cannot disagree on copy.
+    :param messages: ``code -> message`` from the platform register (or ``None`` to use the copy
+        in :data:`falcon_auth.wire.PLAT_CODES`). RUL-175 ③: an override comes **only from the same
+        registry** -- the host's copy of ``registry/PLAT.md`` -- ⛔ never copy written at a raise
+        site or for this call (C-048). Pass the lookup the host's own serializer uses.
     :param retry_after: seconds, on a ``503`` (C-002).
     """
 

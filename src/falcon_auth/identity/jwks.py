@@ -219,6 +219,11 @@ class JWKSStore:
         return self._keys.get(kid)
 
 
+#: The `InvalidToken.reason` for a token that is ours and only stale -- signature, issuer and
+#: audience pass, expiry alone fails (RUL-175 ②). Nothing else carries it.
+EXPIRED = "ExpiredSignatureError"
+
+
 class InvalidToken(Exception):
     """A token failed verification. Carries a short machine-ish ``reason``.
 
@@ -358,6 +363,23 @@ class JWKSVerifier:
                 options=cast(Any, self._options),
                 **decode_kwargs,
             )
+        except jwt.ExpiredSignatureError as e:
+            # RUL-175 ②: "expired" -- PLAT0108, the client refreshes -- ONLY when signature,
+            # issuer and audience all pass and expiry ALONE fails. PyJWT checks `exp` BEFORE
+            # `iss` and `aud`, so an expired token for another service or issuer surfaces here
+            # first. Re-check everything else with expiry off: if that fails, the token was never
+            # ours, and the caller gets that reason (PLAT0101), not "refresh".
+            try:
+                jwt.decode(
+                    token,
+                    key.key,
+                    algorithms=self._algorithms,
+                    options=cast(Any, {**self._options, "verify_exp": False}),
+                    **decode_kwargs,
+                )
+            except jwt.PyJWTError as other:
+                raise InvalidToken(type(other).__name__) from other
+            raise InvalidToken(EXPIRED) from e
         except jwt.PyJWTError as e:
             raise InvalidToken(type(e).__name__) from e
 
@@ -372,6 +394,7 @@ class JWKSVerifier:
 
 __all__ = (
     "DEFAULT_DECODE_OPTIONS",
+    "EXPIRED",
     "JWTDecodeOptions",
     "InvalidToken",
     "JWKSStore",

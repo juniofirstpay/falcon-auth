@@ -87,6 +87,7 @@ from .errors import (
 )
 from .trustcontext import (
     DEVICE_TRUST_ATTESTED,
+    DEVICE_TRUST_RECOGNIZED,
     DEVICE_TRUST_BOUND,
     DEVICE_TRUST_UNTRUSTED,
     SESSION_TRUST_AUTHENTICATED,
@@ -157,6 +158,7 @@ __all__ = (
     "check_session_elevated",
     "DEFAULT_DECODE_OPTIONS",
     "DEVICE_TRUST_ATTESTED",
+    "DEVICE_TRUST_RECOGNIZED",
     "DEVICE_TRUST_BOUND",
     "DEVICE_TRUST_UNTRUSTED",
     "EAST_WEST_KINDS",
