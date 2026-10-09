@@ -37,10 +37,15 @@ at which point the warm path becomes a conditional request rather than a timer.
 for routine operations, and logs a warning each time -- the degradation path (C-011), not a cache
 window a demoted device can hide inside.
 
-KNOWN BREAK, recorded rather than worked around: auth emits **no grants at all** today, under any
-name, so `TrustContext.grants` fails validation against a live auth on every call. That is the
-estate's X-09, it is open against a ratified convention, and closing it is a build at auth plus the
-first allocation into the platform grant register -- not a local edit.
+THE SCHEMA IS THE PLATFORM'S: `registry/TRUST-CONTEXT.md` (normative, RUL-162-165). Besides the
+session and trust fields it requires `grants`, `actor_type` (C-052), `actor_kind` iff OPERATOR,
+`session_kind` and `delegations` (C-053). A missing required field is never defaulted (S4) --
+except under the one recorded deviation, `assume_customer_actor_type` (C-052 §3, RUL-162).
+
+KNOWN BREAK, recorded rather than worked around: auth's feed (`05ebd8c`) carries **no `grants`**
+and none of the C-052/C-053 fields yet, so `TrustContext` fails validation against a live auth on
+every call. Closing it is a build at auth, owed under the schema -- not a local edit. The
+deviation covers `actor_type` (and the C-053 fields that ship with it); it never covers `grants`.
 
 The field is typed REQUIRED deliberately in the face of that. Making it optional would turn a
 service that cannot resolve anybody into one that silently resolves everybody to "holds nothing"
@@ -49,9 +54,9 @@ problem". Failing loudly is the honest state of the layer until auth ships.
 
 RENAMED from `entitlements`, which is what the two services this was ported from call it. C-038
 (RUL-074) rules that what auth emits is a coarse **grant**, never a service's entitlement, and
-X-09 rules the field is renamed rather than accommodated. The name `grants` follows the thread's
-proposed wire shape; the `grant_epoch` and `ETag` it also proposes are left out, being explicitly
-unconfirmed.
+X-09 rules the field is renamed rather than accommodated. `grants` is a plain list, and there is
+⛔ no `grant_epoch` (RUL-134); the feed carries a strong `ETag` (S2), which this package does not
+use because it keeps no trust-context cache to revalidate.
 """
 
 from collections.abc import Callable
@@ -61,6 +66,7 @@ from datetime import (
 )
 from typing import (
     Any,
+    Literal,
     Protocol,
     cast,
 )
@@ -68,7 +74,10 @@ from typing import (
 from pydantic import (
     ConfigDict,
     BaseModel,
+    Field,
     ValidationError,
+    field_validator,
+    model_validator,
 )
 from structlog import get_logger
 import aiohttp
@@ -79,12 +88,15 @@ from .errors import (
 )
 
 __all__ = (
+    "ActorKind",
+    "ActorType",
     "Cache",
     "DEFAULT_LAST_GOOD_TTL",
     "DEVICE_TRUST_ATTESTED",
     "DEVICE_TRUST_RECOGNIZED",
     "DEVICE_TRUST_BOUND",
     "DEVICE_TRUST_UNTRUSTED",
+    "Delegation",
     "HttpTrustContextClient",
     "NullCache",
     "RedisCache",
@@ -92,6 +104,7 @@ __all__ = (
     "SESSION_STATE_REVOKED",
     "SESSION_TRUST_AUTHENTICATED",
     "SESSION_TRUST_ELEVATED",
+    "SessionKind",
     "TrustContext",
     "TrustContextCache",
     "TrustContextClient",
@@ -128,17 +141,58 @@ DEVICE_TRUST_ATTESTED: int = DEVICE_TRUST_RECOGNIZED
 _AUTH_CODE_SESSION_MISS = 8200
 
 
-class TrustContext(BaseModel):
-    """One session's authorization posture, exactly as auth reports it.
+#: C-052 §2: who the caller is, carried identity -> session -> feed, ⛔ never inferred from grants.
+ActorType = Literal["CUSTOMER", "OPERATOR", "SERVICE", "SYSTEM"]
+#: C-052 §2: an operator's kind. Present iff `actor_type` is OPERATOR.
+ActorKind = Literal["AGENT", "ADMIN", "EXTERNAL"]
+#: C-053 §8: a SHADOW session is an operator impersonating a customer, on the customer's routes.
+SessionKind = Literal["NORMAL", "SHADOW"]
 
-    `extra="allow"` so auth may add fields without breaking us -- the same posture the sibling
-    clients in `libs/auth` and `libs/wallet` take.
+
+class Delegation(BaseModel):
+    """One subject-bound grant (C-053 §2): the holder may act for ``subject_ref`` until
+    ``valid_until``. ⛔ Never inside ``grants`` -- a subject-bound grant matched as a plain grant
+    would reach every subject at once."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ref: str
+    grant: str
+    subject_ref: str
+    #: RFC 3339 UTC ``Z``, milliseconds (C-009).
+    valid_until: str
+    #: The operator's case. Present iff the session is SHADOW (C-053 §8).
+    case_ref: str | None = None
+
+    @field_validator("valid_until")
+    @classmethod
+    def _rfc3339_z(cls, value: str) -> str:
+        if not value.endswith("Z"):
+            raise ValueError("valid_until must be RFC 3339 UTC with a 'Z' (C-009)")
+        datetime.fromisoformat(value[:-1] + "+00:00")
+        return value
+
+    def live(self, now: datetime | None = None) -> bool:
+        until = datetime.fromisoformat(self.valid_until[:-1] + "+00:00")
+        return (now or datetime.now(UTC)) < until
+
+
+class TrustContext(BaseModel):
+    """One session's authorization posture -- `registry/TRUST-CONTEXT.md`, the normative schema
+    (RUL-162-165).
+
+    ``extra="allow"``: auth may add fields without breaking us (S4: additive only, by ruling).
+    ⛔ A missing REQUIRED field is never defaulted (S4) -- it fails validation, which the client
+    turns into a loud 503 -- except under the one recorded deviation, see
+    :meth:`from_feed`'s ``assume_customer_actor_type``.
     """
 
     model_config = ConfigDict(extra="allow")
 
     session_ref: str
     user_ref: str
+    client_ref: str
+    device_ref: str | None           # required, nullable: null for a device-less web session
     # The COARSE grants auth confers on this session -- never this service's entitlements.
     # C-038/RUL-074: "a service taking layer-3 output from the identity provider is the collapse
     # C-033 §4 forbids". The service expands these into its own entitlements through its `g` rows.
@@ -155,9 +209,70 @@ class TrustContext(BaseModel):
     session_state: int
     device_trust_level: int          # the combined standing: 1 UNTRUSTED · 2 RECOGNIZED · 3 BOUND
     session_trust_level: int         # 1 AUTHENTICATED · 2 ELEVATED
-    trust_elevated_until: str | None = None
-    client_ref: str | None = None
-    device_ref: str | None = None    # null for a device-less web-onboarding session
+    trust_elevated_until: str | None # required, nullable
+    actor_type: ActorType
+    actor_kind: ActorKind | None = None
+    session_kind: SessionKind
+    delegations: list[Delegation]
+    #: True only when ``actor_type`` was ABSENT and assumed CUSTOMER under the recorded C-052 §3
+    #: deviation (RUL-162). Never set from the wire.
+    actor_type_assumed: bool = Field(default=False, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _never_from_the_wire(cls, data: Any) -> Any:
+        # `actor_type_assumed` is set by `from_feed` alone. A response carrying it is ignored,
+        # so nothing upstream can mark a session as "assumed" -- or un-mark one.
+        if isinstance(data, dict) and "actor_type_assumed" in data:
+            data = {k: v for k, v in data.items() if k != "actor_type_assumed"}
+        return data
+
+    @model_validator(mode="after")
+    def _schema_rules(self) -> "TrustContext":
+        # actor_kind iff OPERATOR (C-052 §2).
+        if (self.actor_type == "OPERATOR") != (self.actor_kind is not None):
+            raise ValueError("actor_kind is present iff actor_type is OPERATOR")
+        # S3: a SHADOW session is an operator, holds no grants, and carries exactly one
+        # delegation, with its case_ref (C-053 §8). case_ref appears on no other session.
+        if self.session_kind == "SHADOW":
+            if self.actor_type != "OPERATOR" or self.grants or len(self.delegations) != 1 \
+                    or self.delegations[0].case_ref is None:
+                raise ValueError(
+                    "a SHADOW session is OPERATOR, with grants = [] and exactly one delegation "
+                    "carrying case_ref (S3)"
+                )
+        elif any(d.case_ref is not None for d in self.delegations):
+            raise ValueError("case_ref appears only on a SHADOW session's delegation")
+        return self
+
+    @classmethod
+    def from_feed(cls, data: Any, *, assume_customer_actor_type: bool = False) -> "TrustContext":
+        """Parse a trust-context response, strictly -- with the one recorded deviation.
+
+        :param assume_customer_actor_type: the C-052 §3 deviation (RUL-162, platform-conventions
+            #23): while auth's feed does not yet carry ``actor_type``, its absence is read as
+            ``CUSTOMER``. **Off by default.** A service that turns it on records a C-052
+            exception in its ``exceptions/<service>.md``, and it **expires at whichever comes
+            first: auth emitting ``actor_type``, or auth enabling any non-customer identity**.
+
+            It covers only what auth has not shipped alongside ``actor_type``: an absent
+            ``session_kind`` is read as ``NORMAL`` and absent ``delegations`` as ``[]`` -- the
+            deny direction (no shadow session, no subject reached). ⚠ That extension is this
+            package's reading of RUL-162, put to the platform. ``grants`` is never defaulted.
+            The route rule -- an assumed CUSTOMER never opens an OPERATOR-only route -- follows
+            from the actor-type guard, since the assumed type IS customer. Logged every time.
+        """
+        if not assume_customer_actor_type or not isinstance(data, dict) or "actor_type" in data:
+            return cls.model_validate(data)
+        filled = {"session_kind": "NORMAL", "delegations": [], **data, "actor_type": "CUSTOMER"}
+        logger.warning(
+            "trust_context_actor_type_assumed",
+            session_ref=data.get("session_ref"),
+            deviation="C-052 §3 (RUL-162): absent actor_type read as CUSTOMER",
+        )
+        context = cls.model_validate(filled)
+        object.__setattr__(context, "actor_type_assumed", True)
+        return context
 
     def project(self, now: datetime | None = None) -> "TrustContext":
         """Collapse an elevation window that has passed, matching auth's own read-path projection.
@@ -198,6 +313,7 @@ class HttpTrustContextClient:
         *,
         path_template: str,
         api_version: str | None,
+        assume_customer_actor_type: bool = False,
     ) -> None:
         """
         :param session_getter: returns the host's already-configured mTLS session.
@@ -223,6 +339,8 @@ class HttpTrustContextClient:
         """
         self._session_getter = session_getter
         self._path_template = path_template
+        # The recorded C-052 §3 deviation -- see TrustContext.from_feed. Off by default.
+        self._assume_customer = assume_customer_actor_type
         self._headers = {"X-API-Version": api_version} if api_version is not None else {}
 
     async def fetch(self, session_ref: str, *, user_ref: str) -> TrustContext:
@@ -233,7 +351,10 @@ class HttpTrustContextClient:
                 path, params={"user_ref": user_ref}, headers=self._headers
             ) as response:
                 if response.status == 200:
-                    return TrustContext.model_validate(await response.json())
+                    return TrustContext.from_feed(
+                        await response.json(),
+                        assume_customer_actor_type=self._assume_customer,
+                    )
                 await self._raise_for(response)
         except (SessionMiss, AuthzUnavailable):
             raise
