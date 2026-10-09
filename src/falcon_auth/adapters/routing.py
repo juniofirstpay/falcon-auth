@@ -16,7 +16,7 @@ last.
     mount(registry, app, "/v1/orders/{order_id}:refund", RefundResource(),
           plane=planes.SERVICE, suffix="refund")
 
-FOUR THINGS ARE REFUSED HERE, each a wiring bug rather than a runtime condition:
+THESE ARE REFUSED HERE, each a wiring bug rather than a runtime condition:
 
     one endpoint on two planes       the original conflict -- two principal types reach it
     one resource CLASS on two planes C-006: Falcon binds an INSTANCE serving many endpoints
@@ -27,6 +27,11 @@ FOUR THINGS ARE REFUSED HERE, each a wiring bug rather than a runtime condition:
                                      nothing to notice when a responder is added
     a PUBLIC route with no stated reason     C-006/RUL-035: "no credential" is a decision
                                      somebody must have made on purpose
+    a path whose first segment is not        C-039 (⛔ mandatory): ``^/v\d+/``. Out of its scope,
+      the API version                        by RUL-135: ``/.well-known/...`` -- and probes, which
+                                     are never mounted here at all (below). A vendor-held
+                                     callback URL is served in BOTH forms while the vendor
+                                     migrates (C-039's mount-and-retire): ``alias_of=``
 
 WHAT IS DELIBERATELY NOT REFUSED. Health and readiness sit OUTSIDE the plane system entirely
 (RUL-033): they answer the platform's probe, not a caller, and are mounted bare and
@@ -45,7 +50,9 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
-from ..planes import PLANES, PUBLIC, RESOURCE_SERVICE_PLANES, SERVICE, USER, Plane
+import structlog
+
+from ..planes import CALLBACK, PLANES, PUBLIC, RESOURCE_SERVICE_PLANES, SERVICE, USER, Plane
 
 __all__ = (
     "DEFAULT_PROBE_PATHS",
@@ -62,6 +69,14 @@ __all__ = (
 #: implicitly, so a service that names its probes differently overrides them in the open instead
 #: of discovering that two strings were baked in here.
 DEFAULT_PROBE_PATHS = frozenset({"/health", "/ready"})
+
+logger = structlog.get_logger("falcon_auth.adapters")
+
+#: C-039: the API version is the first path segment -- the owed check, as RUL-135 words it.
+_VERSIONED = re.compile(r"^/v\d+/")
+#: RUL-135: a `/.well-known/` resource evolves by additions and deprecation notices, never
+#: outright removal, so it carries no version segment.
+_WELL_KNOWN = "/.well-known/"
 
 
 class PlaneConflict(RuntimeError):
@@ -117,6 +132,9 @@ class Registration:
     #: ``CUSTOMER``/``OPERATOR``, ⛔ never "any"; a SERVICE route admits ``SERVICE``; other planes
     #: declare none. ``None`` where none applies.
     actor_types: frozenset[str] | None = None
+    #: For a vendor-held CALLBACK URL still served unversioned, the versioned route it is the
+    #: retiring twin of (C-039's mount-and-retire). ``None`` for every other route.
+    alias_of: str | None = None
 
 
 class PlaneRegistry:
@@ -160,6 +178,7 @@ class PlaneRegistry:
         reason: str | None = None,
         credential: str | None = None,
         actor_types: frozenset[str] | None = None,
+        alias_of: str | None = None,
     ) -> Registration:
         """Record one endpoint's plane, or raise explaining which rule it broke."""
         if plane not in PLANES:
@@ -190,6 +209,11 @@ class PlaneRegistry:
         endpoint = Endpoint(method.upper(), path)
         key = (endpoint.method, endpoint.path)
         version = version_of(path)
+
+        if alias_of is None:
+            _check_versioned(endpoint)
+        else:
+            self._check_alias(plane, endpoint, alias_of, resource_type, credential)
 
         existing = self._by_endpoint.get(key)
         if existing is not None and existing.plane != plane:
@@ -227,12 +251,62 @@ class PlaneRegistry:
             reason=reason,
             credential=credential,
             actor_types=actor_types,
+            alias_of=alias_of,
         )
         self._by_endpoint[key] = registration
         self._by_class.setdefault(resource_type, registration)
         if version is not None:
             self._version_by_class.setdefault(resource_type, version)
         return registration
+
+    def _check_alias(
+        self,
+        plane: Plane,
+        endpoint: Endpoint,
+        alias_of: str,
+        resource_type: type,
+        credential: str | None,
+    ) -> None:
+        """C-039's mount-and-retire: the unversioned form of a vendor-held callback URL.
+
+        A vendor holds the registered URL, so the platform cannot move it in one release; both
+        forms are served while each vendor migrates, then the unversioned one is unmounted. The
+        alias is held to exactly that, so it cannot become a general way round C-039 (an
+        allow-list of legacy paths would be an exception, and C-039 admits none -- RUL-056 Q99):
+
+            on CALLBACK only          first-party callers re-path big-bang; only a vendor URL
+                                      is migrated route by route
+            the path is unversioned   a versioned path needs no alias
+            its twin is mounted FIRST the versioned route, on CALLBACK, same method, same
+                                      resource class, same credential -- one handler, two URLs,
+                                      and nothing the alias could do that the twin cannot
+        """
+        if plane != CALLBACK:
+            raise PlaneConflict(
+                f"{endpoint} is on the {plane} plane; alias_of= is C-039's mount-and-retire for "
+                f"a vendor-held CALLBACK URL only. First-party routes re-path big-bang"
+            )
+        if _VERSIONED.match(endpoint.path):
+            raise PlaneConflict(
+                f"{endpoint} already carries a version segment, so it is no alias -- drop "
+                f"alias_of={alias_of!r}"
+            )
+        twin = self._by_endpoint.get((endpoint.method, alias_of))
+        if twin is None:
+            raise PlaneConflict(
+                f"{endpoint} is declared the retiring alias of {alias_of!r}, but "
+                f"{endpoint.method} {alias_of} is not mounted. Mount the versioned route first "
+                f"(C-039: the vendor migrates TO it)"
+            )
+        if twin.plane != CALLBACK or twin.alias_of is not None:
+            raise PlaneConflict(
+                f"{endpoint}: its twin {twin.endpoint} must be a versioned CALLBACK route"
+            )
+        if twin.resource_type is not resource_type or twin.credential != credential:
+            raise PlaneConflict(
+                f"{endpoint} must serve exactly what {twin.endpoint} serves: the same resource "
+                f"class and the same credential. An alias that differs is a second route"
+            )
 
     # -- reading it back ------------------------------------------------------------------
 
@@ -281,6 +355,13 @@ class PlaneRegistry:
         """
         return {r.endpoint: (r.reason or "") for r in self.routes(PUBLIC).values()}
 
+    def aliases(self) -> dict[Endpoint, str]:
+        """Every unversioned callback URL still served, and the versioned route it retires into.
+
+        C-039's mount-and-retire, as a list: what is left to unmount once each vendor has moved.
+        """
+        return {r.endpoint: r.alias_of for r in self._by_endpoint.values() if r.alias_of}
+
     def __len__(self) -> int:
         return len(self._by_endpoint)
 
@@ -299,6 +380,19 @@ _ADMISSIBLE: dict[str, frozenset[str]] = {
 }
 #: C-052 §8 / C-051: an OPERATOR-only route lives under `/v<n>/ops/`.
 _OPS_PATH = re.compile(r"^/v\d+/ops/")
+
+
+def _check_versioned(endpoint: Endpoint) -> None:
+    """C-039: the API version is the first path segment. ⛔ Mandatory -- no exception exists."""
+    if _VERSIONED.match(endpoint.path) or endpoint.path.startswith(_WELL_KNOWN):
+        return
+    raise PlaneConflict(
+        f"{endpoint}: the API version is the first path segment, ^/v\\d+/ (C-039, mandatory). "
+        f"Mount it as /v1{endpoint.path}. Out of scope (RUL-135): /.well-known/... and health "
+        f"probes -- a probe is mounted bare, outside the plane system, and named in "
+        f"verify_app(exempt_paths=). A vendor-held callback URL still being migrated is served "
+        f"as alias_of= its versioned twin"
+    )
 
 
 def _check_actor_types(plane: Plane, method: str, path: str, actor_types: frozenset[str] | None) -> None:
@@ -335,6 +429,7 @@ def mount(
     dev_only: bool = False,
     credential: str | None = None,
     actor_types: Collection[str] | None = None,
+    alias_of: str | None = None,
 ) -> bool:
     """``app.add_route(...)`` and record the plane of every method the resource answers.
 
@@ -357,6 +452,15 @@ def mount(
         subset of ``{"CUSTOMER", "OPERATOR"}``. A route admitting only ``OPERATOR`` must live under
         ``/v<n>/ops/`` or it refuses to mount (C-052 §8, RUL-178). SERVICE routes admit
         ``SERVICE`` (the default); CALLBACK and PUBLIC routes declare none.
+    :param alias_of: on a CALLBACK route only, the versioned path this UNVERSIONED one is the
+        retiring twin of -- C-039's mount-and-retire, while a vendor still calls the URL it was
+        given. The twin is mounted first, with the same resource and credential::
+
+            mount(registry, app, "/v1/callbacks/paytm", hook, plane=CALLBACK)
+            mount(registry, app, "/callbacks/paytm", hook, plane=CALLBACK,
+                  alias_of="/v1/callbacks/paytm")       # unmount once Paytm has moved
+
+        Every other path must open with ``/v<n>/`` (C-039), or ``/.well-known/`` (RUL-135).
     """
     if credential is not None and not isinstance(credential, str):
         raise PlaneConflict(
@@ -379,7 +483,11 @@ def mount(
         registry.register(
             plane, method, path, type(resource), reason=reason, credential=credential,
             actor_types=frozenset(actor_types) if actor_types is not None else None,
+            alias_of=alias_of,
         )
+    if alias_of is not None:
+        # Visible in every deploy log until the vendor has moved and the alias is unmounted.
+        logger.warning("callback_unversioned_alias", path=path, alias_of=alias_of)
 
     if suffix is not None:
         app.add_route(path, resource, suffix=suffix)
@@ -411,24 +519,8 @@ def responder_methods(resource: Any, suffix: str | None = None) -> list[str]:
 def version_of(path: str) -> str | None:
     """The API version segment of ``path``, per C-039: the version is the FIRST path segment.
 
-    ``None`` for a path with no version segment. This REPORTS; it does not refuse.
-
-    NOT ENFORCING IS DELIBERATE (issue #1 A9). C-039 is ratified and mandatory, and `mount` is
-    the natural chokepoint -- it already refuses four other things at boot. But no consumer
-    route carries a version segment today: orders mounts ``/orders:validate`` and
-    ``/orders/{order_id}:refund``, and C-039's own "Implemented at" counts 112 unversioned
-    routes across auth, persona and payments. Enforcing here would not find a bug; it would
-    refuse to start every service until a migration the convention describes as a big-bang
-    re-path -- a public API break for every mobile call, FE call and peer URL -- is complete.
-
-    And the check is not simply "does it start with /vN". C-039 gives callback and webhook URLs
-    a DIFFERENT migration shape: a vendor holds the registered URL, so both forms are served
-    until that vendor migrates. An unversioned CALLBACK route is therefore correct for as long
-    as the rail has not moved -- orders has one today. Probe paths are a third case, outside the
-    plane system entirely (RUL-033). Written before the per-service migration shape is settled,
-    the check would encode a guess.
-
-    When consumers have re-pathed, this belongs in `register` beside the other refusals.
+    ``None`` for a path with no version segment. This REPORTS; :meth:`PlaneRegistry.register`
+    is what refuses an unversioned path (falcon-auth#1 A9, sequenced by RUL-162 #26).
     """
     head = path.lstrip("/").split("/", 1)[0]
     if len(head) >= 2 and head[0] == "v" and head[1:].isdigit():
