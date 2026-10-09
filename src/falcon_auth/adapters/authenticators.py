@@ -28,18 +28,33 @@ proofs) first, not a verification bolted on here.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
+import hmac
+import time
 import warnings
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional, Protocol
+from datetime import datetime
+from typing import Any, ClassVar, Literal, Optional, Protocol
 
 import falcon.asgi
 import structlog
 
-from ..errors import AuthzUnavailable, TokenExpired, Unauthenticated
+from ..errors import (
+    AuthzUnavailable,
+    CallbackSignatureInvalid,
+    CallbackStale,
+    TokenExpired,
+    Unauthenticated,
+)
 from ..eastwest.verifier import Verifier, peer_cn
 from ..identity.jwks import EXPIRED, InvalidToken, JWKSVerifier
+from .rawbody import raw_body
 from ..planes import (
+    CALLBACK,
+    HMAC,
     JWT,
     MTLS,
     ONE_SHOT_TOKEN,
@@ -529,6 +544,146 @@ class MTLSAuthenticator(PlaneAuthenticator):
         return getattr(principal, "source", None) in self.transport_peers
 
 
+@dataclass(frozen=True)
+class CallbackSource:
+    """The principal a callback authenticates as: WHICH configured source signed it, and how.
+
+    Nothing more. A callback carries no capabilities and no user (C-031): it may only supply
+    data to a transition a legitimate principal already started, so the handler matches the
+    payload against that transition and never treats it as a command.
+    """
+
+    source: str
+    method: Method
+
+
+class HMACAuthenticator(PlaneAuthenticator):
+    """A callback source's signature: an HMAC over the request body's exact bytes (C-031).
+
+        no signature header       ->  None     absent; with nothing else, 401 PLAT0111
+        signature wrong/malformed ->  raises   CallbackSignatureInvalid, 401 PLAT0111
+        signed, but stale         ->  raises   CallbackStale, 401 PLAT0112
+        signed and fresh          ->  CallbackSource(source, "HMAC")
+
+    One instance is ONE source (C-031: one method per source, recorded): its secret, header and
+    encoding are the vendor's contract. Two sources are two instances with two names, each route
+    pinning its own with ``mount(..., credential=)``.
+
+    :param secret: the shared secret, or a zero-argument callable returning the CURRENT one --
+        for a secret the agent renders to a file and rotates. ⛔ Never empty: an HMAC under an
+        empty key is computable by anyone, so it is refused here at construction, and a callable
+        that returns one is a 503 rather than an open door.
+    :param source: the source's name, for the principal and the log.
+    :param selector: where the signature is read. Default ``X-Webhook-Signature``, bare.
+    :param prefix: a literal the vendor puts before the digest, stripped -- ``"sha256="``.
+    :param encoding: how the digest is written: ``hex`` (either case), ``base64``, ``base64url``.
+    :param digest: the hash, from :mod:`hashlib`. Default ``sha256``.
+    :param timestamp_of: ``(req, body) -> datetime | epoch seconds | None``, the moment the
+        vendor signed. Read only AFTER the signature passes, so it is the vendor's word, not the
+        caller's. ``None`` back (no timestamp) is stale. Omitted, no window is checked -- and the
+        handler's transition must then be idempotent on its own, which C-031 asks regardless.
+    :param max_skew: the replay window either side of now, in seconds. Default 300 (ledger's).
+
+    **The body must be the exact bytes.** A re-serialised body breaks the HMAC, so this reads
+    what :class:`~falcon_auth.adapters.rawbody.RawBodyBuffer` kept; without the wrapper it
+    raises ``RuntimeError`` -- a wiring fault, never a 401.
+
+    **What it does not do.** No source-IP allow-list: behind the gateway the peer address is
+    the gateway's, and an IP check belongs where the vendor's address is seen. No nonce store:
+    within the window a captured callback replays, which is why the handler only ever supplies
+    data to an existing transition, and consumes that transition once.
+    """
+
+    #: Step 5's answer when this route's signature is missing: the register's callback row.
+    absent_error: ClassVar[type[Unauthenticated]] = CallbackSignatureInvalid
+
+    def __init__(
+        self,
+        secret: bytes | Callable[[], bytes],
+        *,
+        source: str,
+        selector: Selector = Selector("X-Webhook-Signature"),
+        prefix: str = "",
+        encoding: Literal["hex", "base64", "base64url"] = "hex",
+        digest: str = "sha256",
+        timestamp_of: Callable[[Any, bytes], datetime | float | None] | None = None,
+        max_skew: float = 300.0,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        super().__init__(plane=CALLBACK, method=HMAC, selector=selector)
+        if callable(secret):
+            self._secret: Callable[[], bytes] = secret
+        elif isinstance(secret, bytes) and secret:
+            self._secret = lambda: secret
+        else:
+            raise ValueError(
+                f"HMACAuthenticator({source!r}) needs a non-empty bytes secret: an HMAC under an "
+                f"empty key is computable by anyone"
+            )
+        if not source:
+            raise ValueError("a callback source has a name")
+        if encoding not in ("hex", "base64", "base64url"):
+            raise ValueError(f"encoding is hex, base64 or base64url, not {encoding!r}")
+        hashlib.new(digest)  # an unknown digest fails here, at startup
+        if max_skew <= 0:
+            raise ValueError("max_skew is a positive number of seconds")
+        self.source = source
+        self._prefix = prefix
+        self._encoding = encoding
+        self._digest = digest
+        self._timestamp_of = timestamp_of
+        self._max_skew = max_skew
+        self._clock = clock
+
+    async def __call__(self, req: Any) -> Any | None:
+        assert self.selector is not None
+        presented = self.selector.extract(req)
+        if not presented:
+            return None
+        body = raw_body(req.scope)
+        if body is None:
+            raise RuntimeError(
+                "HMACAuthenticator needs the body's exact bytes: wrap the app in RawBodyBuffer"
+            )
+        secret = self._secret()
+        if not secret:
+            await logger.aerror("callback secret empty", source=self.source)
+            raise AuthzUnavailable(f"callback source {self.source!r} has no secret")
+
+        given = self._decode(presented)
+        expected = hmac.new(secret, body, self._digest).digest()
+        if given is None or not hmac.compare_digest(given, expected):
+            await logger.awarning("callback signature rejected", source=self.source,
+                                  malformed=given is None)
+            raise CallbackSignatureInvalid(f"source {self.source}: signature missing or wrong")
+
+        if self._timestamp_of is not None:
+            signed_at = self._timestamp_of(req, body)
+            if isinstance(signed_at, datetime):
+                signed_at = signed_at.timestamp()
+            if signed_at is None or abs(self._clock() - signed_at) > self._max_skew:
+                await logger.awarning("callback stale", source=self.source, signed_at=signed_at)
+                raise CallbackStale(f"source {self.source}: outside the {self._max_skew}s window")
+
+        return CallbackSource(source=self.source, method=HMAC)
+
+    def _decode(self, presented: str) -> bytes | None:
+        value = presented.strip()
+        if self._prefix:
+            if not value.startswith(self._prefix):
+                return None
+            value = value[len(self._prefix):]
+        try:
+            if self._encoding == "hex":
+                return bytes.fromhex(value)
+            padded = value + "=" * (-len(value) % 4)
+            if self._encoding == "base64url":
+                return base64.urlsafe_b64decode(padded.encode("ascii"))
+            return base64.b64decode(padded.encode("ascii"), validate=True)
+        except (ValueError, binascii.Error, UnicodeEncodeError):
+            return None
+
+
 class CustomAuthenticator(PlaneAuthenticator):
     """A host's own tri-state callable, given the plane, method and carrier the middleware needs.
 
@@ -622,7 +777,9 @@ def _token_from(header_value: str, scheme: str | None) -> str | None:
 __all__ = (
     "PROVEN_AT_PERIMETER",
     "Binding",
+    "CallbackSource",
     "CustomAuthenticator",
+    "HMACAuthenticator",
     "JWTAuthenticator",
     "MTLSAuthenticator",
     "PlaneAuthenticator",

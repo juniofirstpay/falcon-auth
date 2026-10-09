@@ -91,7 +91,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 |---|---|
 | `eastwest/` | verifier · errors · mtls |
 | `identity/` | JWKS store, verifier, Falcon authenticator |
-| `adapters/authenticators.py` | configured credentials — `Selector`, `JWTAuthenticator` · `ReferenceAuthenticator` · `MTLSAuthenticator` · `CustomAuthenticator`, and a declared binding (`PROVEN_AT_PERIMETER`) for `DPoP` tokens (#6) |
+| `adapters/authenticators.py` | configured credentials — `Selector`, `JWTAuthenticator` · `ReferenceAuthenticator` · `MTLSAuthenticator` · `HMACAuthenticator` · `CustomAuthenticator`, and a declared binding (`PROVEN_AT_PERIMETER`) for `DPoP` tokens (#6); a CALLBACK source's HMAC over the exact body bytes, `401 PLAT0111` missing or wrong, `PLAT0112` stale (C-031, #1 A7) |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks · actor types and grant kinds (C-052, C-053) |

@@ -79,6 +79,8 @@ from .wire import PLAT_CODES, FalconAuthError, envelope
 from .errors import (
     AuthzError,
     AuthzUnavailable,
+    CallbackSignatureInvalid,
+    CallbackStale,
     CapabilityDenied,
     SessionMiss,
     ActorTypeNotAdmitted,
@@ -205,6 +207,8 @@ __all__ = (
     "SESSION_TRUST_AUTHENTICATED",
     "SESSION_TRUST_ELEVATED",
     "SessionMiss",
+    "CallbackSignatureInvalid",
+    "CallbackStale",
     "ActorTypeNotAdmitted",
     "StepUpRequired",
     "SubjectNotReachable",

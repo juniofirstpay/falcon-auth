@@ -33,7 +33,8 @@ Modules:
                         legacy_shape=True is the recorded exception
     authenticators.py   RemoteJWKSAuthenticator (boolean, for Authentication) ·
                         JWTAuthenticator / ReferenceAuthenticator / MTLSAuthenticator /
-                        CustomAuthenticator (tri-state, for the plane middleware) --
+                        HMACAuthenticator / CustomAuthenticator (tri-state, for the
+                        plane middleware) --
                         each a configured credential: Selector + check + Binding;
                         jwt_authenticator / mtls_authenticator build them
     hooks.py            ... plus verify_operation_for -- per-operation step-up, called
@@ -53,7 +54,9 @@ from __future__ import annotations
 from .authenticators import (
     PROVEN_AT_PERIMETER,
     Binding,
+    CallbackSource,
     CustomAuthenticator,
+    HMACAuthenticator,
     JWTAuthenticator,
     MTLSAuthenticator,
     PlaneAuthenticator,
@@ -150,6 +153,9 @@ __all__ = (
     "PROVEN_AT_PERIMETER",
     "ReferenceAuthenticator",
     "Selector",
+    # #1 A7: a CALLBACK source's HMAC (C-031)
+    "CallbackSource",
+    "HMACAuthenticator",
     # issue #7 / C-058: the raw body, for the one-shot body binding
     "RAW_BODY_SCOPE_KEY",
     "RawBodyBuffer",

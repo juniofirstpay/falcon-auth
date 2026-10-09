@@ -27,6 +27,8 @@ The mapping a host is expected to apply -- statuses and codes from the platform 
     SessionMiss       -> 403 PLAT0106   the session is dead/unknown -- still a DENY, see below
     StepUpRequired    -> 401 PLAT0109   entitled, but the session is not elevated. Retry AFTER a
                                         challenge (RUL-086; RFC 9470's status)
+    CallbackSignatureInvalid -> 401 PLAT0111   a callback's HMAC missing or wrong (C-031)
+    CallbackStale     -> 401 PLAT0112   a signed callback outside the replay window (C-031)
     AuthzUnavailable  -> 503            authorization state could not be established. Retry with
                                         backoff
 
@@ -60,6 +62,8 @@ from .wire import FalconAuthError
 __all__ = (
     "AuthzError",
     "AuthzUnavailable",
+    "CallbackSignatureInvalid",
+    "CallbackStale",
     "CapabilityDenied",
     "SessionMiss",
     "ActorTypeNotAdmitted",
@@ -158,6 +162,23 @@ class SubjectNotReachable(AuthzError):
     """
 
     plat_code: ClassVar[str] = "PLAT0008"
+
+
+class CallbackSignatureInvalid(Unauthenticated):
+    """A callback's signature is missing, malformed or wrong (C-031).
+
+    A subclass of :class:`Unauthenticated`, so a host catching that still catches it; its own
+    row because the register gives callbacks one (``PLAT0111``). The source and the cause are
+    the log's, in ``trace`` -- the wire says nothing a forger could tune against.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0111"
+
+
+class CallbackStale(Unauthenticated):
+    """A correctly signed callback whose timestamp is outside the replay window (C-031)."""
+
+    plat_code: ClassVar[str] = "PLAT0112"
 
 
 class AuthzUnavailable(AuthzError):
