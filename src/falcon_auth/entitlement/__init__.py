@@ -49,6 +49,7 @@ from .enforcer import (
     build_enforcer,
     normalise_registry,
 )
+from .grants import GrantKind, GrantRegister, GrantRow, Selection, select
 from .resolver import (
     AuthenticatedUser,
     AuthServiceResolver,
@@ -66,6 +67,11 @@ __all__ = (
     "check_peers",
     "FlatnessError",
     "GrantAllResolver",
+    "GrantKind",
+    "GrantRegister",
+    "GrantRow",
+    "Selection",
+    "select",
     "MODEL_TEXT",
     "normalise_registry",
     "PolicyError",

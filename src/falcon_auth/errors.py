@@ -62,7 +62,9 @@ __all__ = (
     "AuthzUnavailable",
     "CapabilityDenied",
     "SessionMiss",
+    "ActorTypeNotAdmitted",
     "StepUpRequired",
+    "SubjectNotReachable",
     "TokenExpired",
     "Unauthenticated",
 )
@@ -132,6 +134,30 @@ class SessionMiss(CapabilityDenied):
     def wire_extras(self) -> dict[str, Any]:
         # A dead session is not about a capability; naming one would mislead the client.
         return {}
+
+
+class ActorTypeNotAdmitted(AuthzError):
+    """The caller's actor type -- or, for an operator on a customer route, its session kind -- is
+    not one this route admits (C-052 §6, C-053 §9).
+
+    Answered as the route not-found, ``404 PLAT0006``, so it never reveals that the route exists
+    (RUL-158). :func:`falcon_auth.adapters.hooks.require` raises Falcon's own
+    ``HTTPRouteNotFound`` for it, so the host's router-miss handler renders it, byte-identical.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0006"
+
+
+class SubjectNotReachable(AuthzError):
+    """A ``Subject-Ref`` this caller may not act on (C-053).
+
+    ONE answer, ``404 PLAT0008``, byte-identical, whatever the cause -- an unknown subject, one
+    without a live delegation (H4), a shadow session's missing or wrong header (H2), a header on an
+    OPERATOR-only route (RUL-177) -- so the response never reveals whether a subject exists or who
+    is delegated to whom. The cause is the log's, in ``trace``.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0008"
 
 
 class AuthzUnavailable(AuthzError):
