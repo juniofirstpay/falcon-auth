@@ -22,6 +22,12 @@ BASE = {
     "session_state": 1,
     "device_trust_level": 3,
     "grants": ["RETAIL_USER"],
+    "client_ref": "client-1",
+    "device_ref": "device-1",
+    "trust_elevated_until": None,
+    "actor_type": "CUSTOMER",
+    "session_kind": "NORMAL",
+    "delegations": [],
 }
 
 
@@ -223,6 +229,8 @@ async def test_a_revoked_session_cannot_pass_a_step_up_gate():
                 "device_trust_level": 3,
                 "session_trust_level": SESSION_TRUST_ELEVATED,
                 "grants": ["RETAIL_USER"],
+                "client_ref": "client-1", "device_ref": None, "trust_elevated_until": None,
+                "actor_type": "CUSTOMER", "session_kind": "NORMAL", "delegations": [],
             })
 
     with pytest.raises(SessionMiss):

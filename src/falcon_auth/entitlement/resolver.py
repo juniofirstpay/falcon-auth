@@ -149,6 +149,11 @@ class AuthServiceResolver:
             session_trust_level=context.session_trust_level,
             device_trust_level=context.device_trust_level,
             trust_elevated_until=context.trust_elevated_until,
+            actor_type=context.actor_type,
+            actor_kind=context.actor_kind,
+            session_kind=context.session_kind,
+            delegations=tuple(context.delegations),
+            actor_type_assumed=context.actor_type_assumed,
         )
 
     # ── the composition, now one half ────────────────────────────────────────────
