@@ -128,22 +128,113 @@ def test_one_class_may_not_serve_two_api_versions(registry):
         registry.register(planes.USER, "GET", "/v2/orders", OrdersResource)
 
 
-def test_the_version_rule_survives_an_unversioned_first_mount(registry):
-    """The class pin is whichever endpoint registered FIRST, and that one may carry no version
-    segment. Reading the version off the pin left it None forever, so every later version
-    compared equal to "no version" and passed -- a class first mounted unversioned could then
-    serve v1 and v2 both. The version is tracked separately for exactly this."""
-    registry.register(planes.CALLBACK, "POST", "/webhooks/sms", RefundResource)
+def test_the_version_rule_survives_an_unversioned_alias(registry):
+    """An unversioned callback alias carries no version, and must not reset the class's: a
+    class serving v1 (and its alias) still may not also serve v2."""
     registry.register(planes.CALLBACK, "POST", "/v1/hooks", RefundResource)
+    registry.register(planes.CALLBACK, "POST", "/hooks", RefundResource, alias_of="/v1/hooks")
     with pytest.raises(PlaneConflict, match="already serves API version 'v1'"):
         registry.register(planes.CALLBACK, "POST", "/v2/hooks", RefundResource)
 
 
-def test_an_unversioned_path_may_sit_beside_a_versioned_one(registry):
-    """No version segment is not a contract claim, so it conflicts with nothing."""
+# ── C-039: the API version is the first path segment ─────────────────────────
+
+
+@pytest.mark.parametrize("plane", [planes.USER, planes.SERVICE, planes.CALLBACK])
+@pytest.mark.parametrize("path", ["/orders", "/v1", "/api/v1/orders", "/V1/orders", "/version1/x"])
+def test_an_unversioned_path_is_refused(registry, plane, path):
+    with pytest.raises(PlaneConflict, match="C-039"):
+        registry.register(plane, "POST", path, RefundResource)
+
+
+def test_an_unversioned_public_path_is_refused(registry):
+    with pytest.raises(PlaneConflict, match="C-039"):
+        registry.register(planes.PUBLIC, "GET", "/terms", ProbeResource, reason="static copy")
+
+
+def test_a_probe_is_not_mounted_on_a_plane(registry):
+    """RUL-033/RUL-135: a probe is outside every plane -- mounted bare, named in exempt_paths.
+    Mounting one as a route is the violation persona's `/ping` on PUBLIC is."""
+    with pytest.raises(PlaneConflict, match="probe"):
+        registry.register(planes.PUBLIC, "GET", "/health", ProbeResource, reason="probe")
+
+
+def test_well_known_stays_out_of_v1(registry):
+    """RUL-135: `/.well-known/` evolves by additions and notices, never removal."""
+    registry.register(planes.PUBLIC, "GET", "/.well-known/jwks.json", ProbeResource,
+                      reason="the signing keys")
+
+
+def test_versioned_paths_mount(registry):
     registry.register(planes.USER, "GET", "/v1/orders", OrdersResource)
-    registry.register(planes.USER, "GET", "/orders-legacy", OrdersResource)
-    assert len(registry) == 2
+    registry.register(planes.USER, "GET", "/v1/orders/{id}:cancel", OrdersResource)
+    registry.register(planes.SERVICE, "GET", "/v12/svc/orders", RefundResource)
+
+
+# ── C-039's mount-and-retire, for a vendor-held callback URL ──────────────────
+
+
+def test_a_callback_alias_serves_the_unversioned_url_beside_its_twin(registry):
+    registry.register(planes.CALLBACK, "POST", "/v1/callbacks/paytm", RefundResource)
+    registry.register(planes.CALLBACK, "POST", "/callbacks/paytm", RefundResource,
+                      alias_of="/v1/callbacks/paytm")
+    assert {str(e): t for e, t in registry.aliases().items()} == {
+        "POST /callbacks/paytm": "/v1/callbacks/paytm"}
+
+
+def test_an_alias_is_for_callbacks_only(registry):
+    registry.register(planes.USER, "GET", "/v1/orders", OrdersResource)
+    with pytest.raises(PlaneConflict, match="CALLBACK URL only"):
+        registry.register(planes.USER, "GET", "/orders", OrdersResource, alias_of="/v1/orders")
+
+
+def test_an_alias_needs_its_twin_mounted_first(registry):
+    with pytest.raises(PlaneConflict, match="not mounted"):
+        registry.register(planes.CALLBACK, "POST", "/callbacks/paytm", RefundResource,
+                          alias_of="/v1/callbacks/paytm")
+
+
+def test_an_alias_of_another_method_is_no_twin(registry):
+    registry.register(planes.CALLBACK, "PUT", "/v1/callbacks/paytm", RefundResource)
+    with pytest.raises(PlaneConflict, match="not mounted"):
+        registry.register(planes.CALLBACK, "POST", "/callbacks/paytm", RefundResource,
+                          alias_of="/v1/callbacks/paytm")
+
+
+def test_an_alias_serves_exactly_what_its_twin_serves(registry):
+    registry.register(planes.CALLBACK, "POST", "/v1/callbacks/paytm", RefundResource,
+                      credential="paytm_hmac")
+    with pytest.raises(PlaneConflict, match="same resource class and the same credential"):
+        registry.register(planes.CALLBACK, "POST", "/callbacks/paytm", RefundResource,
+                          credential="other", alias_of="/v1/callbacks/paytm")
+
+
+def test_a_versioned_path_needs_no_alias(registry):
+    registry.register(planes.CALLBACK, "POST", "/v1/callbacks/paytm", RefundResource)
+    with pytest.raises(PlaneConflict, match="no alias"):
+        registry.register(planes.CALLBACK, "POST", "/v2/callbacks/paytm", RefundResource,
+                          alias_of="/v1/callbacks/paytm")
+
+
+def test_an_alias_of_an_alias_is_refused(registry):
+    registry.register(planes.CALLBACK, "POST", "/v1/callbacks/paytm", RefundResource)
+    registry.register(planes.CALLBACK, "POST", "/callbacks/paytm", RefundResource,
+                      alias_of="/v1/callbacks/paytm")
+    with pytest.raises(PlaneConflict, match="versioned CALLBACK route"):
+        registry.register(planes.CALLBACK, "POST", "/hooks/paytm", RefundResource,
+                          alias_of="/callbacks/paytm")
+
+
+def test_mount_logs_the_alias_until_it_is_unmounted(registry):
+    from structlog.testing import capture_logs
+
+    app = falcon.asgi.App()
+    hook = RefundResource()
+    mount(registry, app, "/v1/callbacks/paytm", hook, plane=planes.CALLBACK, suffix="refund")
+    with capture_logs() as logs:
+        mount(registry, app, "/callbacks/paytm", hook, plane=planes.CALLBACK, suffix="refund",
+              alias_of="/v1/callbacks/paytm")
+    assert any(e["event"] == "callback_unversioned_alias" for e in logs)
 
 
 # ── PUBLIC carries a reason ───────────────────────────────────────────────────

@@ -575,8 +575,9 @@ def test_any_other_unregistered_route_is_still_refused():
 
 def test_a_registered_route_is_never_exempt():
     """Naming a USER route in exempt_paths cannot make it public."""
-    client, _ = build([("/health", planes.USER, "access_token")], exempt_paths={"/health"})
-    assert client.simulate_get("/health").status_code == 401
+    client, _ = build([("/v1/status", planes.USER, "access_token")],
+                      exempt_paths={"/v1/status"})
+    assert client.simulate_get("/v1/status").status_code == 401
 
 
 # ─── helpers for real certificates ───────────────────────────────────────────
