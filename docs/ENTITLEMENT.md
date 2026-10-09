@@ -260,6 +260,63 @@ direction.
 
 ---
 
+## Who is calling, and whose records: actor types and grant kinds (C-052, C-053)
+
+Before the capability check, `require()` answers two questions the feed makes answerable
+(`registry/TRUST-CONTEXT.md`):
+
+**1. Is this kind of caller admitted here?**
+- **The declaration:** every USER route declares the actor types it admits, at mount:
+  `mount(..., actor_types={"CUSTOMER"})`, `{"CUSTOMER", "OPERATOR"}`, or `{"OPERATOR"}`. There is
+  no "any" (C-052 §5), and the server refuses to start on a USER route that declares none.
+- **Operator-only routes** live under `/v<n>/ops/` or refuse to mount (C-052 §8, RUL-178).
+- **The caller's actor type** comes from the feed, never from grants (§3).
+- **Not admitted** ⇒ the route not-found, `404 PLAT0006`, rendered by the host's router miss, so
+  it's byte-identical to a missing route (§6, RUL-158).
+- **An operator on a customer route** is admitted only as a **shadow session** (C-053 §9).
+
+**2. Which grants count?** Every grant has a **kind** (`registry/GRANTS.md` rule 6), and
+`Subject-Ref` selects it. ⛔ Kinds never mix in one decision:
+
+| Route admits | `Subject-Ref` | Grants that count |
+|---|---|---|
+| `CUSTOMER` (± `OPERATOR`) | absent | the caller's `self` grants |
+| `CUSTOMER` (± `OPERATOR`) | present | the caller's **live** `subject` delegations **for that subject** |
+| only `OPERATOR` | absent | the caller's `unbound` grants. Which records they reach is the service's (C-054) |
+| only `OPERATOR` | present | none: refused (RUL-177) |
+
+- **A shadow session** must send `Subject-Ref` naming its one delegation's subject (H2).
+- **Every refusal about a subject** is one answer, `404 PLAT0008`, byte-identical: unknown,
+  undelegated, expired, a shadow session's missing or wrong header, a header on an ops route. The
+  response never reveals whether a subject exists.
+- **A grant outside the session's actor type**, or one the register doesn't list, is a
+  configuration mismatch: `503` (C-052 §7).
+
+**The wiring:**
+```python
+enforcer = build_enforcer(REGISTRY, expansion=EXPANSION, grants={
+    "CUSTOMER_GRANT": ("CUSTOMER", "self"),
+    "DELEGATED_CUSTOMER_GRANT": ("CUSTOMER", "subject"),
+    "AGENT_GRANT": ("OPERATOR", "unbound", "AGENT"),
+})                                   # the register, copied from registry/GRANTS.md -- required
+mount(registry, app, "/v1/orders/{id}", Orders(), plane=USER, actor_types={"CUSTOMER", "OPERATOR"})
+```
+
+**What the service still owns:**
+- **Ownership (H3):** the object's owner equals `principal.subject_ref`, or the caller when it's
+  `None`.
+- **The idempotency key (H6):** include `principal.subject_ref`.
+- **The audit line (H7):** `principal.opened_by` and `principal.opened_by_delegation`, with the
+  actor and the subject.
+- **The local veto on the subject (C-053 §10).**
+- **`Vary: Subject-Ref`** (H5) is set for you.
+
+**While auth's feed lacks `actor_type`:** `HttpTrustContextClient(...,
+assume_customer_actor_type=True)` reads it as `CUSTOMER`. This is a recorded C-052 deviation
+(RUL-162), off by default and logged; an assumed customer never opens an operator-only route.
+
+---
+
 ## The dev escape hatch, and the trap inside it
 
 `GrantAllResolver` gives every caller a fixed entitlement set without contacting auth. It exists

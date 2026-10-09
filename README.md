@@ -85,7 +85,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 449 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 515 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
@@ -94,7 +94,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 | `adapters/authenticators.py` | configured credentials — `Selector`, `JWTAuthenticator` · `ReferenceAuthenticator` · `MTLSAuthenticator` · `CustomAuthenticator`, and a declared binding (`PROVEN_AT_PERIMETER`) for `DPoP` tokens (#6) |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
-| `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks |
+| `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks · actor types and grant kinds (C-052, C-053) |
 | `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, exactly one credential per route, `CLIENT` refused, and the wrong-plane `404 PLAT0006` over I/O-free credentials only (C-060, #11) |
 
 **C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.

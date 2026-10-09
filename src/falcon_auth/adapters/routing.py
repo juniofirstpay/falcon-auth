@@ -40,10 +40,12 @@ path prefix to decide one.
 """
 from __future__ import annotations
 
+import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
-from ..planes import PLANES, PUBLIC, RESOURCE_SERVICE_PLANES, Plane
+from ..planes import PLANES, PUBLIC, RESOURCE_SERVICE_PLANES, SERVICE, USER, Plane
 
 __all__ = (
     "DEFAULT_PROBE_PATHS",
@@ -111,6 +113,10 @@ class Registration:
     #: authenticator on its plane" -- valid only while the plane has exactly one, which the
     #: middleware checks.
     credential: str | None = None
+    #: The actor types this endpoint admits (C-052 §5): a USER route declares at least one of
+    #: ``CUSTOMER``/``OPERATOR``, ⛔ never "any"; a SERVICE route admits ``SERVICE``; other planes
+    #: declare none. ``None`` where none applies.
+    actor_types: frozenset[str] | None = None
 
 
 class PlaneRegistry:
@@ -153,6 +159,7 @@ class PlaneRegistry:
         *,
         reason: str | None = None,
         credential: str | None = None,
+        actor_types: frozenset[str] | None = None,
     ) -> Registration:
         """Record one endpoint's plane, or raise explaining which rule it broke."""
         if plane not in PLANES:
@@ -163,6 +170,8 @@ class PlaneRegistry:
                 f"{method.upper()} {path} is on the {plane} plane, which only the identity "
                 f"provider mounts (C-060 §2). This package serves resource services (RUL-157)"
             )
+
+        _check_actor_types(plane, method, path, actor_types)
 
         if plane == PUBLIC and credential is not None:
             raise PlaneConflict(
@@ -217,6 +226,7 @@ class PlaneRegistry:
             version=version,
             reason=reason,
             credential=credential,
+            actor_types=actor_types,
         )
         self._by_endpoint[key] = registration
         self._by_class.setdefault(resource_type, registration)
@@ -282,6 +292,37 @@ class PlaneRegistry:
 # -- mounting -------------------------------------------------------------------------------
 
 
+#: The actor types a route on each plane may admit (C-052 §2, §5).
+_ADMISSIBLE: dict[str, frozenset[str]] = {
+    USER: frozenset({"CUSTOMER", "OPERATOR"}),
+    SERVICE: frozenset({"SERVICE"}),
+}
+#: C-052 §8 / C-051: an OPERATOR-only route lives under `/v<n>/ops/`.
+_OPS_PATH = re.compile(r"^/v\d+/ops/")
+
+
+def _check_actor_types(plane: Plane, method: str, path: str, actor_types: frozenset[str] | None) -> None:
+    endpoint = f"{method.upper()} {path}"
+    allowed = _ADMISSIBLE.get(plane, frozenset())
+    if actor_types is None:
+        return  # a USER route with none is refused by the middleware's verify() and per request
+    if not actor_types:
+        raise PlaneConflict(
+            f"{endpoint} declares an empty set of actor types: a route admits at least one, "
+            f"⛔ never 'any' (C-052 §5)"
+        )
+    stray = sorted(actor_types - allowed)
+    if stray:
+        raise PlaneConflict(
+            f"{endpoint} is on the {plane} plane, which admits {sorted(allowed) or 'no actor type'}; "
+            f"it declares {stray} (C-052 §2)"
+        )
+    if actor_types == {"OPERATOR"} and not _OPS_PATH.match(path):
+        raise PlaneConflict(
+            f"{endpoint} admits only OPERATOR, so it lives under /v<n>/ops/ (C-052 §8, RUL-178)"
+        )
+
+
 def mount(
     registry: PlaneRegistry,
     app: Any,
@@ -293,6 +334,7 @@ def mount(
     reason: str | None = None,
     dev_only: bool = False,
     credential: str | None = None,
+    actor_types: Collection[str] | None = None,
 ) -> bool:
     """``app.add_route(...)`` and record the plane of every method the resource answers.
 
@@ -311,6 +353,10 @@ def mount(
         Omitted, the route takes the one authenticator on its plane -- the right default
         wherever a plane carries one. ⛔ Never a list: a route that accepts "any of" two
         credentials lets the caller choose the weaker (C-031's reason, at route grain).
+    :param actor_types: who the route admits (C-052 §5) -- REQUIRED on USER routes, a non-empty
+        subset of ``{"CUSTOMER", "OPERATOR"}``. A route admitting only ``OPERATOR`` must live under
+        ``/v<n>/ops/`` or it refuses to mount (C-052 §8, RUL-178). SERVICE routes admit
+        ``SERVICE`` (the default); CALLBACK and PUBLIC routes declare none.
     """
     if credential is not None and not isinstance(credential, str):
         raise PlaneConflict(
@@ -331,7 +377,8 @@ def mount(
     # route rather than with a mounted route the registry disowns.
     for method in methods:
         registry.register(
-            plane, method, path, type(resource), reason=reason, credential=credential
+            plane, method, path, type(resource), reason=reason, credential=credential,
+            actor_types=frozenset(actor_types) if actor_types is not None else None,
         )
 
     if suffix is not None:

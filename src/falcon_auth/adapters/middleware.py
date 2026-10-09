@@ -71,6 +71,7 @@ from ..planes import (
     PLANE_BY_METHOD,
     PUBLIC,
     RESOURCE_SERVICE_PLANES,
+    USER,
     SEARCHABLE_METHODS,
     Method,
     Plane,
@@ -85,6 +86,7 @@ from .routing import (
 )
 
 __all__ = (
+    "ACTOR_TYPES_ATTR",
     "AUTH_CREDENTIAL_ATTR",
     "AUTH_METHOD_ATTR",
     "AUTH_PRINCIPAL_ATTR",
@@ -106,6 +108,9 @@ AUTH_PRINCIPAL_ATTR = "auth_principal"
 #: The name of the authenticator that opened the route. ``None`` on the PUBLIC plane. A handler
 #: that must spend a single-use credential reads this to know which one it holds.
 AUTH_CREDENTIAL_ATTR = "auth_credential"
+#: The actor types the route admits (C-052 §5), for the user-plane gate (`require`), which knows
+#: the caller's actor type only once the trust context resolves. ``None`` off the USER plane.
+ACTOR_TYPES_ATTR = "actor_types"
 
 _METHOD_NAMES: frozenset[str] = frozenset(get_args(Method))
 
@@ -248,9 +253,12 @@ class PlaneAuthenticationMiddleware:
         """
         gaps: dict[Plane, tuple[list[str], list[str]]] = {}
         wrong: list[str] = []
+        undeclared: list[str] = []
         for registration in self._registry.routes().values():
             if registration.plane == PUBLIC:
                 continue
+            if registration.plane == USER and not registration.actor_types:
+                undeclared.append(str(registration.endpoint))
             try:
                 self._accepted(registration)
             except _Gap as gap:
@@ -274,6 +282,11 @@ class PlaneAuthenticationMiddleware:
         if wrong:
             raise UnregisteredRoute(
                 "these routes do not resolve to exactly one credential: " + "; ".join(wrong)
+            )
+        if undeclared:
+            raise UnregisteredRoute(
+                "these USER routes declare no actor types -- mount(..., actor_types={...}); a "
+                "route admits at least one, never 'any' (C-052 §5): " + "; ".join(undeclared)
             )
 
     # -- per request ----------------------------------------------------------------------
@@ -312,6 +325,13 @@ class PlaneAuthenticationMiddleware:
             )
 
         plane = registration.plane
+
+        if plane == USER and not registration.actor_types:
+            raise UnregisteredRoute(
+                f"{method} {template} is a USER route that declares no actor types, so nothing "
+                f"can say who it admits (C-052 §5) -- mount(..., actor_types={{...}})"
+            )
+        setattr(req.context, ACTOR_TYPES_ATTR, registration.actor_types)
 
         if plane == PUBLIC:
             # A stated-reason PUBLIC route establishes no caller principal (C-060 §5). No

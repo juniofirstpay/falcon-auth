@@ -95,8 +95,10 @@ def build(plane, *, authenticators=None, on_mismatch=None, reason=None, credenti
     app = falcon.asgi.App(middleware=[middleware])
     app.add_error_handler(OrderNotFound, render_not_found)
     app.add_error_handler(Unauthenticated, render_unauthenticated)
-    mount(registry, app, "/v1/thing", Echo(), plane=plane, reason=reason, credential=credential)
-    mount(registry, app, "/v1/boom", Boom(), plane=plane, reason=reason, credential=credential)
+    mount(registry, app, "/v1/thing", Echo(), plane=plane, reason=reason, credential=credential,
+          actor_types={"CUSTOMER"} if plane == planes.USER else None)
+    mount(registry, app, "/v1/boom", Boom(), plane=plane, reason=reason, credential=credential,
+          actor_types={"CUSTOMER"} if plane == planes.USER else None)
     return falcon.testing.TestClient(app), registry, app
 
 
@@ -350,7 +352,7 @@ def test_verify_refuses_a_plane_with_no_authenticator():
 def test_verify_passes_when_every_plane_is_covered():
     registry = PlaneRegistry()
     app = falcon.asgi.App()
-    mount(registry, app, "/v1/user", Echo(), plane=planes.USER)
+    mount(registry, app, "/v1/user", Echo(), plane=planes.USER, actor_types={"CUSTOMER"})
     mount(registry, app, "/v1/svc", Boom(), plane=planes.SERVICE)
 
     PlaneAuthenticationMiddleware(
@@ -373,7 +375,7 @@ def test_verify_names_every_plane_at_fault_with_an_example_route():
     """A service with two mis-wired planes fixes both in one pass, not one restart each."""
     registry = PlaneRegistry()
     app = falcon.asgi.App()
-    mount(registry, app, "/v1/user", Echo(), plane=planes.USER)
+    mount(registry, app, "/v1/user", Echo(), plane=planes.USER, actor_types={"CUSTOMER"})
     mount(registry, app, "/v1/svc", Boom(), plane=planes.SERVICE)
 
     middleware = PlaneAuthenticationMiddleware(

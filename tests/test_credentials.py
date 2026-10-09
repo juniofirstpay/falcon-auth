@@ -368,7 +368,8 @@ def build(routes, *, authenticators=RESOURCE, flagged=None, bare=(), **kwargs):
     for path, plane, credential in routes:
         cls = per_plane.setdefault(plane, type(f"Echo{plane}", (Echo,), {}))
         mount(registry, app, path, cls(), plane=plane, credential=credential,
-              reason="test" if plane == planes.PUBLIC else None)
+              reason="test" if plane == planes.PUBLIC else None,
+              actor_types={"CUSTOMER"} if plane == planes.USER else None)
     for path in bare:
         app.add_route(path, Echo())
     return falcon.testing.TestClient(app), mw
