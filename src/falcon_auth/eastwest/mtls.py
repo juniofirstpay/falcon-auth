@@ -34,10 +34,30 @@ which needs no uvicorn and is tested without it; what moved is two class
 statements. ``build_uvicorn_ssl_kwargs`` is uvicorn-SHAPED but uvicorn-free: it
 touches only :mod:`ssl` and returns a dict of kwargs.
 
-**Deferred-with-trigger**: (a) a mesh sidecar terminating mTLS → posture B
-(trust a proxy-injected identity header via a a peer-CN adapter);
-(b) server-cert hot-reload (today the cert loads at boot, so a rotation needs
-a restart — acceptable for infrequently-rotated mTLS certs).
+**Certificate rotation is the companion's, not this module's** (falcon-auth#1 A11). P-05 makes
+every workload honour rotation at any TTL, and the mesh leaf rotates daily -- so a context that
+reads its certificate once at boot would serve a stale leaf until it expired, then fail every
+east-west handshake. The reload belongs to ``vault-agent-companion``
+(juniofirstpay/falcon-vault-agent-companion-), deliberately standalone: this module BUILDS the
+server context (:func:`build_uvicorn_ssl_kwargs`), the companion RELOADS its certificate::
+
+    config = uvicorn.Config(app, http=PeerCertH11Protocol, **build_uvicorn_ssl_kwargs(leaf, "", ca))
+    server = uvicorn.Server(config)
+    rotator = CertRotator()
+    attach(rotator, server, leaf)                 # inbound: uvicorn's server context
+    rotator.register(client_ssl_ctx, leaf)        # outbound: the context YOUR http client presents
+    # start rotator.watch() in the event loop, then: await server.serve()
+
+They touch different parts of one ``SSLContext``: ``load_cert_chain`` swaps the leaf for new
+handshakes and leaves ``verify_mode`` (``CERT_OPTIONAL``) and the CA untouched, and the peer-cert
+capture below reads only the CALLER's certificate. ``tests/test_eastwest_mtls.py`` proves the swap
+through a real handshake. Host conditions: run uvicorn programmatically (``attach`` needs the
+server object), start the watch in the loop, attach in every worker process, and register the
+OUTBOUND client context too -- the same leaf, a second in-memory copy. The trust root (the CA
+bundle) is not reloaded; a CA rotation still needs a restart.
+
+**Deferred-with-trigger**: a mesh sidecar terminating mTLS → posture B (trust a proxy-injected
+identity header via a peer-CN adapter).
 """
 
 from __future__ import annotations
