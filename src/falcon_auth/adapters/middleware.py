@@ -358,8 +358,10 @@ class PlaneAuthenticationMiddleware:
         if foreign is not None:
             self._refuse_wrong_plane(req, template, plane, foreign)
 
-        # Step 5. Nothing usable at all.
-        raise Unauthenticated(f"this endpoint is on the {plane} plane and requires {entry.name}")
+        # Step 5. Nothing usable at all. An authenticator whose register row covers "missing" as
+        # well as "wrong" -- a callback's HMAC, PLAT0111 -- names its own answer.
+        absent = getattr(entry.attempt, "absent_error", Unauthenticated)
+        raise absent(f"this endpoint is on the {plane} plane and requires {entry.name}")
 
     # -- the pieces -----------------------------------------------------------------------
 
