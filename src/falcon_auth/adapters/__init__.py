@@ -71,6 +71,7 @@ from .errors import (
     render_svcplane_error_legacy,
 )
 from .middleware import (
+    ACTOR_TYPES_ATTR,
     AUTH_CREDENTIAL_ATTR,
     AUTH_METHOD_ATTR,
     AUTH_PRINCIPAL_ATTR,
@@ -105,6 +106,7 @@ from .hooks import (
 )
 
 __all__ = (
+    "ACTOR_TYPES_ATTR",
     "AUTH_CREDENTIAL_ATTR",
     "AUTH_METHOD_ATTR",
     "AUTH_PRINCIPAL_ATTR",

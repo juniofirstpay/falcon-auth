@@ -20,8 +20,10 @@ import casbin
 from casbin.model import Model
 
 from collections.abc import Collection, Mapping
+from typing import Any
 
 from ..principal import Principal
+from .grants import GrantRow, normalise_grants
 
 __all__ = ("CapabilityEnforcer", "MODEL_TEXT", "Registry", "build_enforcer", "normalise_registry")
 
@@ -80,10 +82,19 @@ class CapabilityEnforcer:
         registry: Registry,
         *,
         peers: Collection[str] = (),
+        grants: Mapping[str, Any] | None = None,
     ) -> None:
         self._enforcer = enforcer
         self._registry = normalise_registry(registry)
         self._peers = frozenset(peers)
+        self._grants = normalise_grants(grants) if grants is not None else None
+
+    @property
+    def grants(self) -> dict[str, GrantRow] | None:
+        """The grant register this policy was built with -- each grant's actor type and kind
+        (`registry/GRANTS.md` rule 6) -- or ``None``. The user-plane gate needs it: C-052 §7 and
+        C-053's kind rule cannot be applied without it. A copy; do not mutate."""
+        return dict(self._grants) if self._grants is not None else None
 
     @property
     def peers(self) -> frozenset[str]:
@@ -192,6 +203,7 @@ def build_enforcer(
     *,
     expansion: Mapping[str, list[str]] | None = None,
     peers: Mapping[str, list[str]] | None = None,
+    grants: Mapping[str, Any] | None = None,
 ) -> CapabilityEnforcer:
     """Build the gate from a service's capability registry. In-memory: no adapter, no policy file.
 
@@ -219,6 +231,12 @@ def build_enforcer(
 
         Run :func:`falcon_auth.entitlement.verify_policy` with the same ``peers`` at startup --
         it is what proves a peer name never collides with a grant or an entitlement.
+
+    :param grants: the platform grant register, ``name -> GrantRow(actor_type, kind)`` -- or
+        ``(actor_type, kind)`` tuples -- copied from `registry/GRANTS.md`. **Required by**
+        :func:`falcon_auth.adapters.hooks.require`, which applies C-052 §7 (a grant outside the
+        session's actor type is refused) and C-053's kind rule (which grants count, by
+        ``Subject-Ref``). Pass the same names to ``verify_policy(grant_register=...)``.
     """
     normalised = normalise_registry(registry)
 
@@ -233,7 +251,7 @@ def build_enforcer(
     for peer, entitlements in (peers or {}).items():
         for entitlement in entitlements:
             enforcer.add_grouping_policy(peer, entitlement)
-    return CapabilityEnforcer(enforcer, normalised, peers=(peers or {}).keys())
+    return CapabilityEnforcer(enforcer, normalised, peers=(peers or {}).keys(), grants=grants)
 
 
 # ---------------------------------------------------------------------------------------------

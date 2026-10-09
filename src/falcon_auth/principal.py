@@ -60,6 +60,13 @@ class Principal:
     #: True when ``actor_type`` was absent and assumed CUSTOMER under the recorded C-052 §3
     #: deviation (RUL-162). A guard or an audit line can tell the two apart.
     actor_type_assumed: bool = False
+    #: Set by ``require`` once the route is opened. The subject this request acts on (C-053 H3,
+    #: H6), or ``None`` when the caller acts on their own records.
+    subject_ref: str | None = None
+    #: The grant that opened the route -- first match (RUL-076), for the audit line (C-032, H7).
+    opened_by: str | None = None
+    #: The delegation ``ref`` when a subject grant opened it (H7).
+    opened_by_delegation: str | None = None
 
     def holds(self, entitlement: str) -> bool:
         return entitlement in self.entitlements
