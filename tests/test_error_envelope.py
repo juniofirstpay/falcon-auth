@@ -244,7 +244,7 @@ def test_the_wrong_plane_answer_is_the_hosts_router_miss_byte_for_byte():
         async def on_get(self, req, resp):
             resp.media = {}
 
-    mount(registry, app, "/v1/orders", Orders(), plane=planes.USER)
+    mount(registry, app, "/v1/orders", Orders(), plane=planes.USER, actor_types={"CUSTOMER"})
     client = falcon.testing.TestClient(app)
     with capture_logs():
         wrong_plane = client.simulate_get("/v1/orders", headers={"X-Client-Cert": "payments"})

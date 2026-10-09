@@ -54,6 +54,8 @@ class PlatCode:
 PLAT_CODES: Mapping[str, PlatCode] = {
     row.code: row
     for row in (
+        PlatCode("PLAT0006", "route_not_found", 404, "The requested resource was not found."),
+        PlatCode("PLAT0008", "resource_not_found", 404, "The requested item was not found."),
         PlatCode("PLAT0101", "unauthenticated", 401, "Please sign in again."),
         PlatCode("PLAT0102", "forbidden", 403, "You do not have access to this."),
         PlatCode("PLAT0103", "client_certificate_missing", 401,

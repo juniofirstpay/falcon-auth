@@ -114,7 +114,8 @@ def _app(plane, *, cert_der=None):
     app = falcon.asgi.App(middleware=[_InjectCert(), middleware])
     for exc in (_NotFound, Unauthenticated, AuthzUnavailable, Exception):
         app.add_error_handler(exc, render)
-    mount(registry, app, "/v1/thing", Echo(), plane=plane)
+    mount(registry, app, "/v1/thing", Echo(), plane=plane,
+          actor_types={"CUSTOMER"} if plane == planes.USER else None)
     return falcon.testing.TestClient(app)
 
 
@@ -190,7 +191,7 @@ def test_the_boolean_collapse_is_what_produces_the_404():
     app = falcon.asgi.App(middleware=[_InjectCert(), middleware])
     for exc in (_NotFound, Exception):
         app.add_error_handler(exc, render)
-    mount(registry, app, "/v1/thing", Echo(), plane=planes.USER)
+    mount(registry, app, "/v1/thing", Echo(), plane=planes.USER, actor_types={"CUSTOMER"})
 
     r = falcon.testing.TestClient(app).simulate_get(
         "/v1/thing", headers={"Authorization": "Bearer bad"}
