@@ -82,6 +82,7 @@ __all__ = (
     "Cache",
     "DEFAULT_LAST_GOOD_TTL",
     "DEVICE_TRUST_ATTESTED",
+    "DEVICE_TRUST_RECOGNIZED",
     "DEVICE_TRUST_BOUND",
     "DEVICE_TRUST_UNTRUSTED",
     "HttpTrustContextClient",
@@ -113,9 +114,13 @@ SESSION_STATE_REVOKED: int = 2
 SESSION_TRUST_AUTHENTICATED: int = 1
 SESSION_TRUST_ELEVATED: int = 2
 
+#: `device_trust_level` carries the COMBINED standing (registry/TRUST-CONTEXT.md, RUL-164):
+#: device trust gated by integrity, fail-closed to UNTRUSTED unless integrity is VERIFIED.
 DEVICE_TRUST_UNTRUSTED: int = 1
-DEVICE_TRUST_ATTESTED: int = 2
+DEVICE_TRUST_RECOGNIZED: int = 2
 DEVICE_TRUST_BOUND: int = 3
+#: The pre-RUL-164 name of `DEVICE_TRUST_RECOGNIZED` (AUTH-ADR-137 §2 renamed it). Same ordinal.
+DEVICE_TRUST_ATTESTED: int = DEVICE_TRUST_RECOGNIZED
 
 
 # auth's numeric code for "session_ref does not resolve to a live session, or the user_ref guard does
@@ -148,7 +153,7 @@ class TrustContext(BaseModel):
     # validation instead makes that arrive as a loud 503 with a parse error in the logs.
     grants: list[str]
     session_state: int
-    device_trust_level: int          # 1 UNTRUSTED · 2 ATTESTED · 3 BOUND
+    device_trust_level: int          # the combined standing: 1 UNTRUSTED · 2 RECOGNIZED · 3 BOUND
     session_trust_level: int         # 1 AUTHENTICATED · 2 ELEVATED
     trust_elevated_until: str | None = None
     client_ref: str | None = None

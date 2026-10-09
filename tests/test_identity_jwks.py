@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from falcon_auth.identity.jwks import (
+    EXPIRED,
     DEFAULT_DECODE_OPTIONS,
     InvalidToken,
     JWKSStore,
@@ -182,6 +183,43 @@ def test_bad_claims_are_rejected(overrides):
     store = JWKSStore(_Fetcher([jwk]))
     with pytest.raises(InvalidToken):
         asyncio.run(_verifier(store).verify(_token(key, "k1", **overrides)))
+
+
+# ── RUL-175 ②: "expired" only when expiry ALONE fails ─────────────────────────
+
+
+_K1 = _keypair("k1")
+_PAST = {"exp": int(time.time()) - 60, "iat": int(time.time()) - 120}
+
+
+def _reason(token):
+    store = JWKSStore(_Fetcher([_K1[1]]))
+    with pytest.raises(InvalidToken) as e:
+        asyncio.run(_verifier(store).verify(token))
+    return e.value.reason
+
+
+def test_an_expired_token_that_is_otherwise_ours_reads_as_expired():
+    """PLAT0108: refresh -- signature, issuer and audience all pass."""
+    assert _reason(_token(_K1[0], "k1", **_PAST)) == EXPIRED
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [{"aud": "https://other.test"}, {"iss": "https://evil.test"}],
+    ids=["expired-and-wrong-audience", "expired-and-wrong-issuer"],
+)
+def test_an_expired_token_that_was_never_ours_does_not_read_as_expired(wrong):
+    """PyJWT checks `exp` BEFORE `iss`/`aud`, so this used to report "expired" -- telling a
+    caller holding another service's token to refresh, where RUL-175 requires PLAT0101."""
+    reason = _reason(_token(_K1[0], "k1", **_PAST, **wrong))
+    assert reason != EXPIRED
+    assert reason in {"InvalidAudienceError", "InvalidIssuerError"}
+
+
+def test_an_expired_token_with_a_bad_signature_does_not_read_as_expired():
+    other_key, _ = _keypair("k1")                      # same kid, a key the store doesn't hold
+    assert _reason(_token(other_key, "k1", **_PAST)) == "InvalidSignatureError"
 
 
 # ── key selection and rotation ────────────────────────────────────────────────

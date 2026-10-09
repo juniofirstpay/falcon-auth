@@ -7,12 +7,17 @@ the three fail-closed east-west conditions:
 - **SERVICE principal lacks the route's ``noun:verb`` capability** → 403
   :class:`MissingCapabilityError`
 
-**One word, capability** (C-055, proposed; falcon-auth#8). What a route demands is a
+**One word, capability** (C-055, ratified ``v26``; falcon-auth#8). What a route demands is a
 capability on both planes. The old names -- ``MissingScopeError``, ``missing_scope`` -- still
 work: the first IS the new class, the second is accepted and read back with a
-``DeprecationWarning``. **The wire is unchanged** until C-055 is ratified and the envelope work
-in falcon-auth#1 A8 lands: ``title`` stays ``"MissingScopeError"`` and ``extras`` keeps its
-``scope`` key, because a consumer's client may already branch on them.
+``DeprecationWarning``.
+
+**The wire is C-001's, by default** (RUL-160/161): these render as ``401 PLAT0103``,
+``403 PLAT0104`` and ``403 PLAT0102`` with ``extras.capability``, through
+``falcon_auth.adapters.errors``. The pre-C-001 body below -- ``title`` and the numeric ``code``,
+with ``extras.scope`` for a missing capability -- is what :meth:`SvcPlaneError.json` still
+produces, used only under ``register_error_handlers(app, legacy_shape=True)``, a C-001 exception
+the consumer records.
 
 **Hardened by the package** (uniform across every consuming repo):
 
