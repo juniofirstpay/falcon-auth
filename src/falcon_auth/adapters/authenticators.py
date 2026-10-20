@@ -49,6 +49,7 @@ from ..errors import (
     TokenExpired,
     Unauthenticated,
 )
+from ..eastwest.errors import ClientCertificateMissing
 from ..eastwest.verifier import Verifier, peer_cn
 from ..identity.jwks import EXPIRED, InvalidToken, JWKSVerifier
 from .rawbody import raw_body
@@ -500,7 +501,8 @@ class ReferenceAuthenticator(PlaneAuthenticator):
 class MTLSAuthenticator(PlaneAuthenticator):
     """A peer certificate checked against the allow-list.
 
-        no client certificate      ->  None   nothing was presented
+        no client certificate      ->  None   nothing was presented; with nothing else
+                                              usable, 401 PLAT0103 (falcon-auth#27)
         CN not in the allow-list   ->  raises UnknownCNError
         CN in the allow-list       ->  the east-west Principal
 
@@ -522,6 +524,9 @@ class MTLSAuthenticator(PlaneAuthenticator):
         carrying no token would answer 404 instead of 401. On a SERVICE route the hop is an
         ordinary caller: this changes only the search.
     """
+
+    #: Step 5's answer when the route's certificate is missing: `registry/PLAT.md`'s PLAT0103.
+    absent_error: ClassVar[type[Unauthenticated]] = ClientCertificateMissing
 
     def __init__(
         self,

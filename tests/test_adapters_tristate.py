@@ -100,11 +100,15 @@ def _app(plane, *, cert_der=None):
                 req.scope.setdefault("extensions", {})["tls"] = {"peer_cert_der": cert_der}
 
     async def render(req, resp, ex, params):
-        resp.status = {
-            _NotFound: falcon.HTTP_404,
-            Unauthenticated: falcon.HTTP_401,
-            AuthzUnavailable: falcon.HTTP_503,
-        }.get(type(ex), falcon.HTTP_403)
+        # By isinstance: subclasses (TokenExpired, ClientCertificateMissing) keep their base's status.
+        resp.status = next(
+            (status for kind, status in (
+                (_NotFound, falcon.HTTP_404),
+                (Unauthenticated, falcon.HTTP_401),
+                (AuthzUnavailable, falcon.HTTP_503),
+            ) if isinstance(ex, kind)),
+            falcon.HTTP_403,
+        )
         resp.media = {"error": type(ex).__name__}
 
     class Echo:
@@ -248,6 +252,7 @@ def test_no_certificate_is_absent_not_invalid():
     client = _app(planes.SERVICE, cert_der=None)
     r = client.simulate_get("/v1/thing")
     assert r.status_code == 401, "step 5: nothing usable at all"
+    assert r.json["error"] == "ClientCertificateMissing", "PLAT0103's row, falcon-auth#27"
 
 
 def test_an_unknown_cn_raises_rather_than_reading_as_a_wrong_plane_probe():

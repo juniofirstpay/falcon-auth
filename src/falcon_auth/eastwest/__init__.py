@@ -19,6 +19,7 @@ during migration can be attributed to one or the other.
 from __future__ import annotations
 
 from .errors import (
+    ClientCertificateMissing,
     MissingCapabilityError,
     MissingClientCertError,
     MissingScopeError,
@@ -41,6 +42,7 @@ from .verifier import (
 
 __all__ = (
     "AllowList",
+    "ClientCertificateMissing",
     "KIND_CALLBACK",
     "KIND_SERVICE",
     "MissingCapabilityError",

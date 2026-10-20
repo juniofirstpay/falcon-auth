@@ -50,6 +50,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from ..errors import Unauthenticated
 from ..wire import FalconAuthError
 
 
@@ -165,6 +166,22 @@ class SvcPlaneError(FalconAuthError):
         return body
 
 
+class ClientCertificateMissing(Unauthenticated):
+    """No client certificate on a SERVICE-plane route reached through the plane middleware.
+
+    ``401 PLAT0103``, the row `registry/PLAT.md` gives exactly this condition (falcon-auth#27).
+    :class:`~falcon_auth.adapters.authenticators.MTLSAuthenticator` names it as its
+    ``absent_error``: the authenticator itself must still answer "absent" -- a user-plane request
+    carries no certificate and must not look like a broken service credential -- so only the
+    middleware's last step, with nothing usable found, raises it.
+
+    The middleware-mode twin of :class:`MissingClientCertError`, which only
+    ``Verifier.authenticate`` raises. An ``Unauthenticated`` so a host catching that catches it.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0103"
+
+
 class MissingClientCertError(SvcPlaneError):
     """East-west route reached without a verified client certificate.
 
@@ -248,6 +265,7 @@ MissingScopeError = MissingCapabilityError
 
 
 __all__ = (
+    "ClientCertificateMissing",
     "MissingCapabilityError",
     "MissingClientCertError",
     "MissingScopeError",
