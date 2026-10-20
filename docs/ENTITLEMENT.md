@@ -291,12 +291,17 @@ Before the capability check, `require()` answers two questions the feed makes an
   response never reveals whether a subject exists.
 - **A grant outside the session's actor type**, or one the register doesn't list, is a
   configuration mismatch: `503` (C-052 §7).
+- **A delegation with `valid_until: null`** has no time bound (RUL-193). That is allowed only
+  where the grant's register row says the bound is *optional*. On a *required* grant, or a subject
+  row that declares none, that one delegation counts as absent: `404 PLAT0008`, never perpetual,
+  never a session-wide `503`.
 
 **The wiring:**
 ```python
 enforcer = build_enforcer(REGISTRY, expansion=EXPANSION, grants={
     "CUSTOMER_GRANT": ("CUSTOMER", "self"),
-    "DELEGATED_CUSTOMER_GRANT": ("CUSTOMER", "subject"),
+    "DELEGATED_CUSTOMER_GRANT": ("CUSTOMER", "subject", None, "optional"),
+    "CUSTOMER_IMPERSONATION_GRANT": ("OPERATOR", "subject", "AGENT", "required"),
     "AGENT_GRANT": ("OPERATOR", "unbound", "AGENT"),
 })                                   # the register, copied from registry/GRANTS.md -- required
 mount(registry, app, "/v1/orders/{id}", Orders(), plane=USER, actor_types={"CUSTOMER", "OPERATOR"})
