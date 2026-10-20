@@ -57,9 +57,6 @@ class Principal:
     session_kind: str | None = None
     #: Subject-bound grants (C-053 §2), as the feed carries them. Never mixed into ``entitlements``.
     delegations: tuple[Any, ...] = ()
-    #: True when ``actor_type`` was absent and assumed CUSTOMER under the recorded C-052 §3
-    #: deviation (RUL-162). A guard or an audit line can tell the two apart.
-    actor_type_assumed: bool = False
     #: Set by ``require`` once the route is opened. The subject this request acts on (C-053 H3,
     #: H6), or ``None`` when the caller acts on their own records.
     subject_ref: str | None = None

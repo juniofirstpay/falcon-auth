@@ -67,6 +67,8 @@ PLAT_CODES: Mapping[str, PlatCode] = {
         PlatCode("PLAT0108", "token_expired", 401,
                  "Your session needs refreshing. Please try again."),
         PlatCode("PLAT0109", "step_up_required", 401, "Please verify it's you to continue."),
+        PlatCode("PLAT0114", "onboarding_incomplete", 423,
+                 "Please finish setting up your account to continue."),
         PlatCode("PLAT0111", "callback_signature_invalid", 401,
                  "The request could not be authorised."),
         PlatCode("PLAT0112", "callback_stale", 401, "The request could not be authorised."),

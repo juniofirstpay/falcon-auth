@@ -47,14 +47,21 @@ from ..errors import ActorTypeNotAdmitted, AuthzUnavailable, SubjectNotReachable
 logger = structlog.get_logger("falcon_auth.entitlement")
 
 __all__ = (
+    "CUSTOMER_GRANT",
     "GrantKind",
     "GrantRegister",
     "GrantRow",
+    "ONBOARDING_GRANT",
     "Selection",
     "TimeBound",
     "normalise_grants",
     "select",
 )
+
+#: The two grants RUL-187 names. Platform register names, ⛔ immutable once allocated (rule 2).
+#: A user who signed up holds ONBOARDING_GRANT, swapped for CUSTOMER_GRANT on onboarding.
+ONBOARDING_GRANT = "ONBOARDING_GRANT"
+CUSTOMER_GRANT = "CUSTOMER_GRANT"
 
 GrantKind = Literal["self", "subject", "unbound"]
 _KINDS = frozenset({"self", "subject", "unbound"})

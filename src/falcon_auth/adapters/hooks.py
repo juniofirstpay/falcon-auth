@@ -44,9 +44,10 @@ from structlog import get_logger
 from ..assurance.operation import BodyHasher, OperationVerifier, raw_body_hash, verify_operation
 from ..assurance.stepup import check_session_elevated
 from ..entitlement.enforcer import CapabilityEnforcer
+from ..entitlement.grants import CUSTOMER_GRANT, ONBOARDING_GRANT
 from ..entitlement.grants import select as select_grants
 from ..entitlement.resolver import Resolver
-from ..errors import ActorTypeNotAdmitted, CapabilityDenied, Unauthenticated
+from ..errors import ActorTypeNotAdmitted, CapabilityDenied, OnboardingIncomplete, Unauthenticated
 from ..eastwest.errors import MissingCapabilityError
 from ..eastwest.verifier import Principal, Verifier
 from ..planes import SERVICE
@@ -397,7 +398,9 @@ def require(
        no ``Subject-Ref``; live ``subject`` delegations for the named subject with one; ``unbound``
        grants on an OPERATOR-only route, where a ``Subject-Ref`` is refused. Kinds never mix. Every
        subject refusal is one ``404 PLAT0008`` (H2, H4, RUL-177).
-    3. **the capability** -- first match per grant (RUL-076); none ⇒ ``CapabilityDenied``.
+    3. **the capability** -- first match per grant (RUL-076); none ⇒ ``CapabilityDenied`` --
+       unless the session holds only ``ONBOARDING_GRANT`` and ``CUSTOMER_GRANT`` would open the
+       route: then ``423 PLAT0114``, so the app goes to onboarding (RUL-187).
 
     The principal left on ``req.context.principal`` carries ``subject_ref`` (the service's
     ownership check and idempotency key, H3, H6), and ``opened_by`` / ``opened_by_delegation`` for
@@ -472,6 +475,15 @@ def require(
         )
         setattr(req.context, PRINCIPAL_ATTR, principal)
         if opened is None:
+            if (
+                selection.subject_ref is None
+                and set(principal.entitlements) == {ONBOARDING_GRANT}
+                and enforcer.opened_by([CUSTOMER_GRANT], capability) is not None
+            ):
+                raise OnboardingIncomplete(
+                    f"{capability} needs {CUSTOMER_GRANT}; the session holds only "
+                    f"{ONBOARDING_GRANT} (RUL-187)"
+                )
             raise CapabilityDenied(
                 f"missing entitlement for {capability}", capability=capability,
             )

@@ -300,6 +300,7 @@ Before the capability check, `require()` answers two questions the feed makes an
 ```python
 enforcer = build_enforcer(REGISTRY, expansion=EXPANSION, grants={
     "CUSTOMER_GRANT": ("CUSTOMER", "self"),
+    "ONBOARDING_GRANT": ("CUSTOMER", "self"),
     "DELEGATED_CUSTOMER_GRANT": ("CUSTOMER", "subject", None, "optional"),
     "CUSTOMER_IMPERSONATION_GRANT": ("OPERATOR", "subject", "AGENT", "required"),
     "AGENT_GRANT": ("OPERATOR", "unbound", "AGENT"),
@@ -316,9 +317,16 @@ mount(registry, app, "/v1/orders/{id}", Orders(), plane=USER, actor_types={"CUST
 - **The local veto on the subject (C-053 §10).**
 - **`Vary: Subject-Ref`** (H5) is set for you.
 
-**While auth's feed lacks `actor_type`:** `HttpTrustContextClient(...,
-assume_customer_actor_type=True)` reads it as `CUSTOMER`. This is a recorded C-052 deviation
-(RUL-162), off by default and logged; an assumed customer never opens an operator-only route.
+**Signed up, not onboarded (RUL-187):** auth issues `ONBOARDING_GRANT` to every new user, and
+swaps it for `CUSTOMER_GRANT` once persona reports onboarding. A session holding only
+`ONBOARDING_GRANT`, on a route `CUSTOMER_GRANT` would open, answers **`423 PLAT0114`** so the app
+can send the user to onboarding. It is never retried, and it is not a `403`. Only persona binds
+`ONBOARDING_GRANT` in its `g` rows. Every service's register copy must still **list** it, or
+`build_enforcer` refuses to start: a missing row would turn every new user's request into a `503`.
+
+**The feed is read strictly.** The stopgap that read an absent `actor_type` as `CUSTOMER` has
+ended (RUL-188), now that auth emits `actor_type`, `session_kind` and `delegations`.
+`assume_customer_actor_type=True` refuses.
 
 ---
 

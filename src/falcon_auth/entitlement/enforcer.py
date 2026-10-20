@@ -23,7 +23,7 @@ from collections.abc import Collection, Mapping
 from typing import Any
 
 from ..principal import Principal
-from .grants import GrantRow, normalise_grants
+from .grants import ONBOARDING_GRANT, GrantRow, normalise_grants
 
 __all__ = ("CapabilityEnforcer", "MODEL_TEXT", "Registry", "build_enforcer", "normalise_registry")
 
@@ -239,6 +239,15 @@ def build_enforcer(
         ``Subject-Ref``). Pass the same names to ``verify_policy(grant_register=...)``.
     """
     normalised = normalise_registry(registry)
+    if grants is not None and ONBOARDING_GRANT not in grants:
+        # Auth issues it to every new user by default (RUL-187). Missing from the copy, it would
+        # be an unregistered grant -- a 503 on every route for every user not yet onboarded,
+        # where RUL-187 asks for 423 PLAT0114. Refused here, at startup.
+        raise ValueError(
+            f"the grant register has no {ONBOARDING_GRANT} row: copy it from registry/GRANTS.md "
+            f"-- (\"CUSTOMER\", \"self\") -- or every not-yet-onboarded user gets a 503 "
+            f"instead of 423 PLAT0114 (RUL-187)"
+        )
 
     model: Model = casbin.Enforcer.new_model(text=MODEL_TEXT)
     enforcer = casbin.Enforcer(model)

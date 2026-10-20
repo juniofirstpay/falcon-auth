@@ -27,6 +27,9 @@ The mapping a host is expected to apply -- statuses and codes from the platform 
     SessionMiss       -> 403 PLAT0106   the session is dead/unknown -- still a DENY, see below
     StepUpRequired    -> 401 PLAT0109   entitled, but the session is not elevated. Retry AFTER a
                                         challenge (RUL-086; RFC 9470's status)
+    OnboardingIncomplete -> 423 PLAT0114   signed up, not onboarded: the session holds only
+                                        ONBOARDING_GRANT on a route CUSTOMER_GRANT opens. Never
+                                        retried; the app goes to onboarding (RUL-187)
     CallbackSignatureInvalid -> 401 PLAT0111   a callback's HMAC missing or wrong (C-031)
     CallbackStale     -> 401 PLAT0112   a signed callback outside the replay window (C-031)
     AuthzUnavailable  -> 503            authorization state could not be established. Retry with
@@ -65,6 +68,7 @@ __all__ = (
     "CallbackSignatureInvalid",
     "CallbackStale",
     "CapabilityDenied",
+    "OnboardingIncomplete",
     "SessionMiss",
     "ActorTypeNotAdmitted",
     "StepUpRequired",
@@ -150,6 +154,23 @@ class ActorTypeNotAdmitted(AuthzError):
     """
 
     plat_code: ClassVar[str] = "PLAT0006"
+
+
+class OnboardingIncomplete(AuthzError):
+    """The caller signed up but has not onboarded (RUL-187): the session holds only
+    ``ONBOARDING_GRANT``, on a user-plane route that ``CUSTOMER_GRANT`` opens.
+
+    ``423 PLAT0114``, so the app can branch to onboarding:
+
+        ⛔ not 404 PLAT0006   the actor type (CUSTOMER) IS admitted; RUL-158's 404 hides a route
+                             from the wrong actor type, not the right one
+        ⛔ not 403 PLAT0102   a denial tells the app nothing it can do; this tells it where to go
+
+    Deterministic (C-050): never retried. Deliberately not a ``CapabilityDenied`` -- a host
+    mapping that alone would render the wrong answer.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0114"
 
 
 class SubjectNotReachable(AuthzError):

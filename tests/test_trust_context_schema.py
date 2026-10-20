@@ -1,7 +1,7 @@
 """The trust-context feed, per `registry/TRUST-CONTEXT.md` (normative, RUL-162-165).
 
-Strict parsing -- a missing required field is never defaulted (S4) -- with exactly one recorded
-exception, the C-052 §3 deviation (RUL-162, platform-conventions#23).
+Strict parsing -- a missing required field is never defaulted (S4). The one recorded exception,
+the C-052 §3 deviation (RUL-162), has ended (RUL-188 6).
 """
 from __future__ import annotations
 
@@ -49,8 +49,7 @@ SHADOW = {
 
 def test_a_customer_session_parses():
     ctx = TrustContext.model_validate(CUSTOMER)
-    assert (ctx.actor_type, ctx.session_kind, ctx.delegations, ctx.actor_type_assumed) == (
-        "CUSTOMER", "NORMAL", [], False)
+    assert (ctx.actor_type, ctx.session_kind, ctx.delegations) == ("CUSTOMER", "NORMAL", [])
 
 
 def test_a_delegated_customer_session_parses():
@@ -135,70 +134,53 @@ def test_an_expired_delegation_is_not_live():
     assert not ctx.delegations[0].live()
 
 
-# ─── the recorded C-052 §3 deviation (RUL-162) ───────────────────────────────
+# ─── the C-052 §3 deviation has ended (RUL-188 6) ────────────────────────────
 
-AUTH_TODAY = {k: v for k, v in CUSTOMER.items()
-              if k not in ("actor_type", "session_kind", "delegations")}
+AUTH_BEFORE_FEDDA23 = {k: v for k, v in CUSTOMER.items()
+                       if k not in ("actor_type", "session_kind", "delegations")}
 
 
-def test_off_by_default_an_absent_actor_type_fails():
+@pytest.mark.parametrize("missing", ["actor_type", "session_kind", "delegations"])
+def test_a_missing_actor_field_is_an_error_again(missing):
     with pytest.raises(ValidationError):
-        TrustContext.from_feed(AUTH_TODAY)
+        TrustContext.from_feed({k: v for k, v in CUSTOMER.items() if k != missing})
 
 
-def test_on_an_absent_actor_type_reads_as_customer_and_is_logged():
-    with capture_logs() as logs:
-        ctx = TrustContext.from_feed(AUTH_TODAY, assume_customer_actor_type=True)
-    assert (ctx.actor_type, ctx.session_kind, ctx.delegations, ctx.actor_type_assumed) == (
-        "CUSTOMER", "NORMAL", [], True)
-    assert any(e["event"] == "trust_context_actor_type_assumed" for e in logs)
-
-
-def test_on_a_present_actor_type_is_taken_as_sent_and_nothing_is_assumed():
-    ctx = TrustContext.from_feed(SHADOW, assume_customer_actor_type=True)
-    assert ctx.actor_type == "OPERATOR" and not ctx.actor_type_assumed
-
-
-def test_the_deviation_never_defaults_grants():
+def test_from_feed_is_strict():
+    assert TrustContext.from_feed(CUSTOMER).actor_type == "CUSTOMER"
     with pytest.raises(ValidationError):
-        TrustContext.from_feed({k: v for k, v in AUTH_TODAY.items() if k != "grants"},
-                               assume_customer_actor_type=True)
+        TrustContext.from_feed(AUTH_BEFORE_FEDDA23)
 
 
-def test_the_assumed_flag_is_never_taken_from_the_wire():
-    assert not TrustContext.model_validate({**CUSTOMER, "actor_type_assumed": True}).actor_type_assumed
-    assert "actor_type_assumed" not in TrustContext.model_validate(CUSTOMER).model_dump()
+def test_the_http_client_refuses_the_ended_switch():
+    with pytest.raises(ValueError, match="RUL-188"):
+        HttpTrustContextClient(lambda: None, path_template="/t/{session_ref}",  # type: ignore[arg-type,return-value]
+                               api_version=None, assume_customer_actor_type=True)
 
 
-async def test_the_http_client_carries_the_switch():
-    def client(payload, **kw):
-        class _Resp:
-            status = 200
+async def test_the_http_client_reads_the_feed_strictly():
+    class _Resp:
+        status = 200
 
-            async def json(self):
-                return payload
+        async def json(self):
+            return AUTH_BEFORE_FEDDA23
 
-            async def __aenter__(self):
-                return self
+        async def __aenter__(self):
+            return self
 
-            async def __aexit__(self, *a):
-                return False
+        async def __aexit__(self, *a):
+            return False
 
-        class _Session:
-            def get(self, path, **kw):
-                return _Resp()
-
-        return HttpTrustContextClient(lambda: _Session(), path_template="/t/{session_ref}",  # type: ignore[arg-type,return-value]
-                                      api_version=None, **kw)
+    class _Session:
+        def get(self, path, **kw):
+            return _Resp()
 
     from falcon_auth.errors import AuthzUnavailable
 
-    with pytest.raises(AuthzUnavailable):
-        await client(AUTH_TODAY).fetch("sess-1", user_ref="user-1")
-    with capture_logs():
-        ctx = await client(AUTH_TODAY, assume_customer_actor_type=True).fetch("sess-1",
-                                                                            user_ref="user-1")
-    assert ctx.actor_type == "CUSTOMER" and ctx.actor_type_assumed
+    client = HttpTrustContextClient(lambda: _Session(), path_template="/t/{session_ref}",  # type: ignore[arg-type,return-value]
+                                    api_version=None)
+    with capture_logs(), pytest.raises(AuthzUnavailable):
+        await client.fetch("sess-1", user_ref="user-1")
 
 
 # ─── the principal carries what the guards (C-052, C-053) will read ──────────
@@ -221,4 +203,4 @@ async def test_the_resolver_puts_the_actor_fields_on_the_principal():
     principal = await AuthServiceResolver(_Client(), TrustContextCache(NullCache())).resolve(_User())
     assert (principal.actor_type, principal.actor_kind, principal.session_kind) == (
         "OPERATOR", "AGENT", "SHADOW")
-    assert principal.delegations[0].case_ref == "case_9" and not principal.actor_type_assumed
+    assert principal.delegations[0].case_ref == "case_9"
