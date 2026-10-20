@@ -23,6 +23,11 @@ READINGS this follows (ruled or put to the platform):
     operator on a customer     served only as a SHADOW session (C-053 §9); a NORMAL operator
     route                      session is not admitted there
     shadow session             must send Subject-Ref equal to its one delegation's subject (H2)
+    a delegation's time bound  `valid_until: null` is no bound -- allowed only where the grant's
+                               register row says the bound is OPTIONAL. On a REQUIRED one (or a
+                               row that declares none) the delegation counts as none: H4's
+                               404 PLAT0008, ⛔ never perpetual, ⛔ never a session-wide 503
+                               (RUL-193 D1-D3); an expired one likewise (RUL-180 reading 4)
     every subject refusal      one answer, 404 PLAT0008, byte-identical (H2, H4, RUL-162/177)
     grant vs actor type        a feed grant (or delegation) outside the session's actor type, or
                                one the register does not list, is a configuration mismatch:
@@ -35,12 +40,28 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+import structlog
+
 from ..errors import ActorTypeNotAdmitted, AuthzUnavailable, SubjectNotReachable
 
-__all__ = ("GrantKind", "GrantRegister", "GrantRow", "Selection", "normalise_grants", "select")
+logger = structlog.get_logger("falcon_auth.entitlement")
+
+__all__ = (
+    "GrantKind",
+    "GrantRegister",
+    "GrantRow",
+    "Selection",
+    "TimeBound",
+    "normalise_grants",
+    "select",
+)
 
 GrantKind = Literal["self", "subject", "unbound"]
 _KINDS = frozenset({"self", "subject", "unbound"})
+#: `registry/GRANTS.md`'s *time bound* column (RUL-193 D2): whether a delegation of a SUBJECT
+#: grant must carry a `valid_until`.
+TimeBound = Literal["optional", "required"]
+_TIME_BOUNDS = frozenset({"optional", "required"})
 #: The actor types a grant can belong to. Grants ride the USER-plane feed, so SERVICE and SYSTEM
 #: never hold one.
 _GRANT_ACTORS = frozenset({"CUSTOMER", "OPERATOR"})
@@ -48,18 +69,37 @@ _GRANT_ACTORS = frozenset({"CUSTOMER", "OPERATOR"})
 
 @dataclass(frozen=True)
 class GrantRow:
-    """One row of `registry/GRANTS.md`: the grant's actor type and kind (rule 6)."""
+    """One row of `registry/GRANTS.md`: the grant's actor type and kind (rule 6), and for a
+    subject grant its time bound (RUL-193 D2)."""
 
     actor_type: str
     kind: GrantKind
     #: For an OPERATOR grant, the kind of operator (``AGENT`` · ``ADMIN`` · ``EXTERNAL``).
     actor_kind: str | None = None
+    #: Subject grants only: ``"optional"`` -- a ``null`` ``valid_until`` is no bound -- or
+    #: ``"required"``. Left ``None`` on a subject grant it reads as REQUIRED: a ``null`` is then
+    #: never perpetual. Copy the register's column so an optional grant is honoured.
+    time_bound: TimeBound | None = None
 
     def __post_init__(self) -> None:
         if self.actor_type not in _GRANT_ACTORS:
             raise ValueError(f"a grant's actor type is CUSTOMER or OPERATOR, not {self.actor_type!r}")
         if self.kind not in _KINDS:
             raise ValueError(f"a grant's kind is one of {sorted(_KINDS)}, not {self.kind!r}")
+        if self.time_bound is not None:
+            if self.time_bound not in _TIME_BOUNDS:
+                raise ValueError(
+                    f"a time bound is one of {sorted(_TIME_BOUNDS)}, not {self.time_bound!r}"
+                )
+            if self.kind != "subject":
+                raise ValueError(
+                    "only a subject grant has a time bound (registry/GRANTS.md, RUL-193 D2)"
+                )
+
+    @property
+    def unbounded_allowed(self) -> bool:
+        """Whether a delegation of this grant may carry ``valid_until: null`` (RUL-193 D2)."""
+        return self.time_bound == "optional"
 
 
 #: ``grant name -> its row``, as the host copies it from `registry/GRANTS.md`.
@@ -67,7 +107,7 @@ GrantRegister = Mapping[str, GrantRow]
 
 
 def normalise_grants(grants: Mapping[str, Any]) -> dict[str, GrantRow]:
-    """Accept ``GrantRow`` values, or ``(actor_type, kind)`` / ``(actor_type, kind, actor_kind)``."""
+    """Accept ``GrantRow`` values, or ``(actor_type, kind[, actor_kind[, time_bound]])``."""
     out: dict[str, GrantRow] = {}
     for name, row in grants.items():
         out[name] = row if isinstance(row, GrantRow) else GrantRow(*row)
@@ -125,16 +165,20 @@ def select(
     if subject_header is None:
         return Selection(grants=[g for g in held if grants[g].kind == "self"])
 
-    live = [
-        d for d in principal.delegations
-        if d.subject_ref == subject_header and d.live(now)
-    ]
     usable: list[str] = []
     delegation_for: dict[str, str] = {}
-    for d in live:
+    for d in principal.delegations:
+        if d.subject_ref != subject_header:
+            continue
         row = _row_for(d.grant, actor, grants)
         if row.kind != "subject":
             raise AuthzUnavailable(f"delegation {d.ref} carries {d.grant!r}, which is not a subject grant")
+        if d.valid_until is None and not row.unbounded_allowed:
+            # RUL-193 D3: a defect in the feed, scoped to THIS delegation -- it counts as none.
+            logger.warning("delegation_unbounded_on_required_grant", ref=d.ref, grant=d.grant)
+            continue
+        if not d.live(now):
+            continue
         if d.grant not in delegation_for:
             usable.append(d.grant)
             delegation_for[d.grant] = d.ref

@@ -152,27 +152,38 @@ SessionKind = Literal["NORMAL", "SHADOW"]
 class Delegation(BaseModel):
     """One subject-bound grant (C-053 §2): the holder may act for ``subject_ref`` until
     ``valid_until``. ⛔ Never inside ``grants`` -- a subject-bound grant matched as a plain grant
-    would reach every subject at once."""
+    would reach every subject at once.
+
+    ``valid_until`` is required but NULLABLE (RUL-193 D1): ``null`` is no time bound -- the
+    delegation ends only when auth stops emitting it (an explicit revocation), ⛔ never by a
+    timer here. Whether a ``null`` is ALLOWED is the grant's to say, not the value's (D2): see
+    `falcon_auth.entitlement.grants.GrantRow.time_bound`, which the guard checks (D3)."""
 
     model_config = ConfigDict(extra="allow")
 
     ref: str
     grant: str
     subject_ref: str
-    #: RFC 3339 UTC ``Z``, milliseconds (C-009).
-    valid_until: str
+    #: RFC 3339 UTC ``Z``, milliseconds (C-009), or ``None`` for no time bound (RUL-193 D1).
+    valid_until: str | None
     #: The operator's case. Present iff the session is SHADOW (C-053 §8).
     case_ref: str | None = None
 
     @field_validator("valid_until")
     @classmethod
-    def _rfc3339_z(cls, value: str) -> str:
+    def _rfc3339_z(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.endswith("Z"):
             raise ValueError("valid_until must be RFC 3339 UTC with a 'Z' (C-009)")
         datetime.fromisoformat(value[:-1] + "+00:00")
         return value
 
     def live(self, now: datetime | None = None) -> bool:
+        """Whether the bound has not passed. ``None`` -- no bound -- is live: only auth ending
+        it ends it (RUL-193 D1). Whether this GRANT may go unbounded is checked by the guard."""
+        if self.valid_until is None:
+            return True
         until = datetime.fromisoformat(self.valid_until[:-1] + "+00:00")
         return (now or datetime.now(UTC)) < until
 
