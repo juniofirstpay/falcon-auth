@@ -414,6 +414,10 @@ def _error_code(body: Any) -> int | None:
 
 DEFAULT_LAST_GOOD_TTL = 900     # only ever read when the source is down
 
+#: What :meth:`TrustContextCache.forget` writes over a session's last-good copy. The two-method
+#: :class:`Cache` has no delete, so an ended session's copy is OVERWRITTEN, never left to expire.
+_TOMBSTONE = "ended"
+
 # There is deliberately no trust TTL and no grants TTL. Assurance is live (C-038/RUL-072), and
 # with assurance uncacheable a grants-only entry can never be assembled into a context, so
 # holding one would be dead weight that reads like a working cache.
@@ -535,10 +539,25 @@ class TrustContextCache:
             f"lastgood:{context.session_ref}", context.model_dump_json(), self._last_good_ttl
         )
 
+    async def forget(self, session_ref: str) -> None:
+        """Destroy the last-good copy of a session auth has said is over (falcon-auth#30).
+
+        Called when auth DENIES the session -- 404/410, or a state other than ENABLED. Without
+        it, the copy written before the denial is served again the moment auth becomes
+        unreachable, on every worker sharing the cache, for up to ``last_good_ttl``: a revoked
+        session transacting again during an outage, against C-038's live revocation.
+
+        It overwrites rather than deletes (the protocol has no delete), for as long as a copy
+        could have lived. ⚠ It cannot stop a fetch that succeeded on another worker just BEFORE
+        the revocation from writing its copy just AFTER this; that window is one request wide,
+        and the next fetch's denial closes it.
+        """
+        await self._cache.set(f"lastgood:{session_ref}", _TOMBSTONE, self._last_good_ttl)
+
     async def read_last_good(self, session_ref: str) -> TrustContext | None:
         """The stale copy served when the source is unreachable -- routine operations only (§10)."""
         raw = await self._cache.get(f"lastgood:{session_ref}")
-        if raw is None:
+        if raw is None or raw == _TOMBSTONE:
             return None
         try:
             return TrustContext.model_validate_json(raw)
