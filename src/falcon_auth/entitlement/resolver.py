@@ -49,6 +49,7 @@ moved; the second stays, and the reason they part company is that only one of th
   aggregate supplies none, and should say so in its build status rather than pretend the layer
   is enforced.
 """
+import hashlib
 from collections.abc import Callable
 from typing import (
     Any,
@@ -176,6 +177,11 @@ class AuthServiceResolver:
         # cached read and a fresh one, because there is no cached read to select.
         try:
             context = await self._client.fetch(session_ref, user_ref=user_ref)
+        except SessionMiss:
+            # Auth DENIED the session. Its last-good copy must not outlive the denial, or the
+            # next outage serves it again (falcon-auth#30).
+            await self._forget(session_ref)
+            raise
         except AuthzUnavailable:
             if consequential:
                 # The entitlement IS the control here. Fail closed.
@@ -185,12 +191,30 @@ class AuthServiceResolver:
                 raise
             await logger.awarning(
                 "trust source unreachable; serving last-good grants for a routine operation",
-                session_ref=session_ref,
+                session_ref_hash=_ref_hash(session_ref),
             )
             return last_good.project()
 
-        await self._cache.write(context)
+        if context.session_state == SESSION_STATE_ENABLED:
+            await self._cache.write(context)
+        else:
+            # Revoked, but answered 200 (see `_assert_session_live`): never a copy to fall back on.
+            await self._forget(session_ref)
         return context
+
+    async def _forget(self, session_ref: str) -> None:
+        try:
+            await self._cache.forget(session_ref)
+        except Exception as e:  # noqa: BLE001 -- the denial stands whatever the cache does
+            await logger.aerror(
+                "could not destroy an ended session's last-good copy",
+                session_ref_hash=_ref_hash(session_ref), error=str(e),
+            )
+
+
+def _ref_hash(ref: str) -> str:
+    """A log-safe stand-in for a session reference: correlatable, not replayable."""
+    return hashlib.sha256(ref.encode()).hexdigest()[:16]
 
 
 def _assert_session_live(context: TrustContext) -> None:
