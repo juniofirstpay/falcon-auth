@@ -273,9 +273,8 @@ def test_there_is_no_before_hook_for_this():
 # ── the HTTP client and the version header auth requires ─────────────────────
 
 
-async def test_the_verifier_sends_the_api_version_and_posts_the_user_ref():
-    """Auth gates every endpoint on X-API-Version (validate_api_version, 400/E1004 when missing).
-    C-039 retires the header; auth has not adopted it. Required argument, no default."""
+async def test_the_verifier_posts_the_user_ref_and_no_version_header():
+    """falcon-auth#2: no X-API-Version (C-039, RUL-050; auth retired it in #317)."""
     from falcon_auth.assurance.operation import HttpOperationVerifier
 
     seen: dict = {}
@@ -304,13 +303,12 @@ async def test_the_verifier_sends_the_api_version_and_posts_the_user_ref():
 
     verifier = HttpOperationVerifier(
         lambda: _Session(),  # type: ignore[arg-type,return-value]
-        path_template="/internal/sessions/{session_ref}/operations/{operation_id}:verify",
-        api_version="1",
+        path_template="/v1/internal/sessions/{session_ref}/operations/{operation_id}:verify",
     )
     out = await verifier.verify("sess-1", "op-1", user_ref="user-1")
 
-    assert seen["path"] == "/internal/sessions/sess-1/operations/op-1:verify"
-    assert seen["headers"] == {"X-API-Version": "1", "Content-Type": "application/json"}
+    assert seen["path"] == "/v1/internal/sessions/sess-1/operations/op-1:verify"
+    assert seen["headers"] == {"Content-Type": "application/json"}, "no X-API-Version"
     assert json.loads(seen["data"]) == {"user_ref": "user-1"}, "user_ref rides in the BODY"
     assert "json" not in seen, "bytes, so a host's own session wrapper takes it (C-064 §4)"
     assert out.consumed_at == "2026-08-07T10:22:45Z"
@@ -340,7 +338,14 @@ async def test_a_410_is_the_uniform_miss():
     verifier = HttpOperationVerifier(
         lambda: _Session(),  # type: ignore[arg-type,return-value]
         path_template="/internal/sessions/{session_ref}/operations/{operation_id}:verify",
-        api_version="1",
     )
     with pytest.raises(OperationChallengeMiss):
         await verifier.verify("sess-1", "op-1", user_ref="user-1")
+
+
+def test_the_verifier_warns_on_an_api_version():
+    from falcon_auth.assurance.operation import HttpOperationVerifier
+
+    with pytest.warns(DeprecationWarning, match="api_version"):
+        HttpOperationVerifier(lambda: None,  # type: ignore[arg-type,return-value]
+                              path_template="/v1/x/{session_ref}/{operation_id}", api_version="1")
