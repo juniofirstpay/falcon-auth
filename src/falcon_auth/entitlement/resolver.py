@@ -233,10 +233,39 @@ class GrantAllResolver:
     The trust fields stay `None`: this resolver knows nothing about assurance, and reporting a
     fabricated trust level would let an assurance rule silently pass in dev on evidence that does not
     exist.
+
+    **Actor type (falcon-auth#28).** A route declares the actor types it admits (C-052), so a
+    principal with none reaches no user-plane route through :func:`~falcon_auth.adapters.hooks.require`.
+    Pass ``actor_type`` (and ``actor_kind`` for an OPERATOR) to say who the dev caller is; the
+    session is NORMAL with no delegations. Under ``require`` the fixed list is matched as GRANTS
+    against the register, so it names grants of that actor type -- ``["CUSTOMER_GRANT"]`` -- and a
+    name outside the register is the same 503 a live feed would get.
     """
 
-    def __init__(self, entitlements: list[str]) -> None:
+    def __init__(
+        self,
+        entitlements: list[str],
+        *,
+        actor_type: str | None = None,
+        actor_kind: str | None = None,
+    ) -> None:
+        if actor_type not in (None, "CUSTOMER", "OPERATOR"):
+            raise ValueError(
+                f"a user-plane caller is CUSTOMER or OPERATOR (C-052), not {actor_type!r}"
+            )
+        if (actor_type == "OPERATOR") != (actor_kind is not None):
+            raise ValueError("actor_kind is given iff actor_type is OPERATOR (C-052 §2)")
+        if actor_kind not in (None, "AGENT", "ADMIN", "EXTERNAL"):
+            raise ValueError(f"an operator is AGENT, ADMIN or EXTERNAL, not {actor_kind!r}")
         self._entitlements = list(entitlements)
+        self._actor_type = actor_type
+        self._actor_kind = actor_kind
 
     async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
-        return Principal(user_ref=str(user.id), entitlements=list(self._entitlements))
+        return Principal(
+            user_ref=str(user.id),
+            entitlements=list(self._entitlements),
+            actor_type=self._actor_type,
+            actor_kind=self._actor_kind,
+            session_kind="NORMAL" if self._actor_type is not None else None,
+        )

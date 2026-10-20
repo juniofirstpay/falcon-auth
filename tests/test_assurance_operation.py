@@ -6,6 +6,8 @@ challenge. The replay and in-progress branches must return without touching it -
 there is no `before` hook for this, and why a test asserts there isn't one.
 """
 
+import json
+
 import falcon
 import falcon.asgi
 import falcon.testing
@@ -308,8 +310,9 @@ async def test_the_verifier_sends_the_api_version_and_posts_the_user_ref():
     out = await verifier.verify("sess-1", "op-1", user_ref="user-1")
 
     assert seen["path"] == "/internal/sessions/sess-1/operations/op-1:verify"
-    assert seen["headers"] == {"X-API-Version": "1"}
-    assert seen["json"] == {"user_ref": "user-1"}, "user_ref rides in the BODY, not the query"
+    assert seen["headers"] == {"X-API-Version": "1", "Content-Type": "application/json"}
+    assert json.loads(seen["data"]) == {"user_ref": "user-1"}, "user_ref rides in the BODY"
+    assert "json" not in seen, "bytes, so a host's own session wrapper takes it (C-064 §4)"
     assert out.consumed_at == "2026-08-07T10:22:45Z"
 
 
