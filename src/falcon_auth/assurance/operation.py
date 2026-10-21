@@ -52,6 +52,8 @@ from collections.abc import Callable
 from typing import Any, ClassVar, Protocol
 
 import aiohttp
+
+from .. import outbound
 from pydantic import BaseModel, ConfigDict, ValidationError
 from structlog import get_logger
 
@@ -275,7 +277,7 @@ class HttpOperationVerifier:
 
     def __init__(
         self,
-        session_getter: Callable[[], aiohttp.ClientSession],
+        session_getter: Callable[[], "aiohttp.ClientSession | outbound.OutboundSession"],
         *,
         path_template: str,
         api_version: str | None,
@@ -313,9 +315,10 @@ class HttpOperationVerifier:
         )
         try:
             session = self._session_getter()
-            async with session.post(
-                path, json={"user_ref": user_ref}, headers=self._headers
+            async with outbound.post(
+                session, path, body={"user_ref": user_ref}, headers=self._headers
             ) as response:
+                await outbound.refuse_redirect(response, call="operation-verify")
                 if response.status == 200:
                     return OperationVerification.model_validate(await response.json())
                 await self._raise_for(response, operation_id)

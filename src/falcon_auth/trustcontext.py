@@ -82,6 +82,8 @@ from pydantic import (
 from structlog import get_logger
 import aiohttp
 
+from . import outbound
+
 from .errors import (
     AuthzUnavailable,
     SessionMiss,
@@ -320,14 +322,17 @@ class HttpTrustContextClient:
 
     def __init__(
         self,
-        session_getter: Callable[[], aiohttp.ClientSession],
+        session_getter: Callable[[], "aiohttp.ClientSession | outbound.OutboundSession"],
         *,
         path_template: str,
         api_version: str | None,
         assume_customer_actor_type: bool = False,
     ) -> None:
         """
-        :param session_getter: returns the host's already-configured mTLS session.
+        :param session_getter: returns the host's already-configured mTLS session -- a plain
+            ``aiohttp.ClientSession``, or the host's own wrapper exposing ``get(url, params=,
+            headers=)``. Either way the call follows no redirect (C-064); see
+            :mod:`falcon_auth.outbound`.
         :param path_template: auth's trust-context path, with a `{session_ref}` placeholder.
             Required, with no default. The path is a deployment fact -- where auth is
             mounted, and under which API version -- and a default here would be a guess
@@ -358,9 +363,10 @@ class HttpTrustContextClient:
         path = self._path_template.format(session_ref=session_ref)
         try:
             session = self._session_getter()
-            async with session.get(
-                path, params={"user_ref": user_ref}, headers=self._headers
+            async with outbound.get(
+                session, path, params={"user_ref": user_ref}, headers=self._headers
             ) as response:
+                await outbound.refuse_redirect(response, call="trust-context")
                 if response.status == 200:
                     return TrustContext.from_feed(
                         await response.json(),

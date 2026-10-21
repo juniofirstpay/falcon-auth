@@ -387,3 +387,39 @@ async def test_an_enabled_session_still_resolves():
     resolver = _resolver(_Client(state=SESSION_STATE_ENABLED))
     p = await resolver.resolve(_User(sid="sess-1"))
     assert p.session_ref == "sess-1"
+
+
+# ── GrantAllResolver carries an actor type (falcon-auth#28) ──────────────────
+
+
+async def test_grant_all_carries_the_actor_type_it_is_given():
+    from falcon_auth.entitlement.grants import GrantRow, select
+
+    p = await GrantAllResolver(["CUSTOMER_GRANT"], actor_type="CUSTOMER").resolve(_User(id="u-7"))
+    assert (p.user_ref, p.actor_type, p.actor_kind, p.session_kind) == (
+        "u-7", "CUSTOMER", None, "NORMAL")
+    register = {"CUSTOMER_GRANT": GrantRow("CUSTOMER", "self")}
+    assert select(p, admitted={"CUSTOMER"}, subject_header=None, grants=register).grants == [
+        "CUSTOMER_GRANT"], "a {CUSTOMER} route is reachable in dev"
+
+
+async def test_grant_all_as_an_operator():
+    p = await GrantAllResolver(["AGENT_GRANT"], actor_type="OPERATOR",
+                               actor_kind="AGENT").resolve(_User())
+    assert (p.actor_type, p.actor_kind) == ("OPERATOR", "AGENT")
+
+
+async def test_grant_all_without_an_actor_type_is_unchanged():
+    p = await GrantAllResolver(["ORDER_READ"]).resolve(_User())
+    assert (p.actor_type, p.session_kind) == (None, None)
+
+
+@pytest.mark.parametrize("kw", [
+    {"actor_type": "SERVICE"},
+    {"actor_type": "OPERATOR"},
+    {"actor_type": "CUSTOMER", "actor_kind": "AGENT"},
+    {"actor_type": "OPERATOR", "actor_kind": "BOSS"},
+])
+def test_grant_all_refuses_an_impossible_actor(kw):
+    with pytest.raises(ValueError):
+        GrantAllResolver([], **kw)
