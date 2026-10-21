@@ -95,7 +95,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks · actor types and grant kinds (C-052, C-053) |
-| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, exactly one credential per route, `CLIENT` refused, and the wrong-plane `404 PLAT0006` over I/O-free credentials only (C-060, #11); every path opens with `/v<n>/` or refuses to mount, `/.well-known/` aside, with a vendor-held callback URL served as `alias_of=` its versioned twin until the vendor moves (C-039, RUL-135; #1 A9) |
+| `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, exactly one credential per route, `CLIENT` refused, and the wrong-plane `404 PLAT0006` over I/O-free credentials only (C-060, #11); every path opens with `/v<n>/` or refuses to mount, `/.well-known/` aside, with a vendor-held callback URL served as `alias_of=` its versioned twin until the vendor moves (C-039, RUL-135; #1 A9); `verify_app` returns the advisory route-table lint, plane prefix, casing and `mock` (C-051, C-068; RUL-206, #38) |
 
 **C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
 

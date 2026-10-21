@@ -60,7 +60,10 @@ __all__ = (
     "PlaneConflict",
     "PlaneRegistry",
     "Registration",
+    "RouteFinding",
+    "RouteReport",
     "UnregisteredRoute",
+    "lint_routes",
     "mount",
     "verify_app",
 )
@@ -135,6 +138,8 @@ class Registration:
     #: For a vendor-held CALLBACK URL still served unversioned, the versioned route it is the
     #: retiring twin of (C-039's mount-and-retire). ``None`` for every other route.
     alias_of: str | None = None
+    #: Mounted with ``dev_only=True`` -- for the route-table lint (C-051's ``mock`` prefix).
+    dev_only: bool = False
 
 
 class PlaneRegistry:
@@ -179,6 +184,7 @@ class PlaneRegistry:
         credential: str | None = None,
         actor_types: frozenset[str] | None = None,
         alias_of: str | None = None,
+        dev_only: bool = False,
     ) -> Registration:
         """Record one endpoint's plane, or raise explaining which rule it broke."""
         if plane not in PLANES:
@@ -252,6 +258,7 @@ class PlaneRegistry:
             credential=credential,
             actor_types=actor_types,
             alias_of=alias_of,
+            dev_only=dev_only,
         )
         self._by_endpoint[key] = registration
         self._by_class.setdefault(resource_type, registration)
@@ -484,6 +491,7 @@ def mount(
             plane, method, path, type(resource), reason=reason, credential=credential,
             actor_types=frozenset(actor_types) if actor_types is not None else None,
             alias_of=alias_of,
+            dev_only=dev_only,
         )
     if alias_of is not None:
         # Visible in every deploy log until the vendor has moved and the alias is unmounted.
@@ -536,8 +544,8 @@ def verify_app(
     registry: PlaneRegistry,
     *,
     exempt_paths: frozenset[str] = DEFAULT_PROBE_PATHS,
-) -> None:
-    """Refuse to start if any mounted route never reached the registry.
+) -> "RouteReport":
+    """Refuse to start if any mounted route never reached the registry; report the rest.
 
     :func:`mount` guarantees that what goes through it is registered; this catches what did not
     -- a bare ``app.add_route`` somewhere, which is the failure the registry cannot see from the
@@ -550,6 +558,8 @@ def verify_app(
         answer the platform's probe, not a caller.
     :raises UnregisteredRoute: naming every offending route at once, so a service with several
         fixes them in one pass rather than one restart each.
+    :returns: the route-table lint (:func:`lint_routes`, RUL-206), each finding already logged
+        once as ``route_lint``. Advisory: nothing in it stops the start.
     """
     from falcon import inspect as falcon_inspect
 
@@ -574,3 +584,119 @@ def verify_app(
             "their callers -- mount them through falcon_auth.adapters.routing.mount, or name "
             f"them in exempt_paths if they sit outside the plane system: {sorted(unregistered)}"
         )
+
+    report = lint_routes(registry)
+    for finding in report.findings:
+        logger.warning("route_lint", rule=finding.rule, check=finding.check,
+                       route=finding.route, detail=finding.detail)
+    return report
+
+
+# -- the route-table lint (RUL-206) ---------------------------------------------------------
+#
+# C-051 §6: "a service may compare its route table's prefixes with its declared planes" -- built
+# here, because this registry already holds every route's plane and already refuses start on
+# C-039 (L3) and RUL-178 (L2). The rest is ADVISORY:
+#
+#     L1  the plane prefix after the version (C-051 §4)       warning -- never a refusal (§6)
+#     L4  literal segments and verbs lowercase-hyphenated     warning for now; refuses start in a
+#         (C-068 §1)                                          later release, once persona renames
+#                                                             (persona#213, RUL-206 Q-L1)
+#     L5  `mock` only for a dev/test route (C-051 §4)         warning
+#
+# Out of scope: `/.well-known/` (RUL-135), probes (never mounted here), and an unversioned
+# callback alias -- its path is the URL the vendor holds, and RUL-211 retires it before go-live.
+# Query parameter names (C-068 §4) are not in a route table; they are the handler's.
+
+#: C-051 §4's vocabulary: the second segment, by plane.
+_PLANE_PREFIX: dict[str, str] = {SERVICE: "svc", CALLBACK: "callbacks", PUBLIC: "public"}
+_PREFIXES = frozenset({"svc", "callbacks", "public", "ops", "mock"})
+#: C-068 §1.
+_CASING = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+_PARAM = re.compile(r"\{[^}]*\}")
+
+
+@dataclass(frozen=True)
+class RouteFinding:
+    """One advisory finding of the route-table lint."""
+
+    rule: str      # the convention: "C-051 §4", "C-068 §1"
+    check: str     # "L1", "L4", "L5" (RUL-206)
+    route: str     # "GET,POST /v1/orders"
+    detail: str
+
+
+@dataclass(frozen=True)
+class RouteReport:
+    """The lint's findings -- C-061's conformance report, as far as the route table goes."""
+
+    findings: tuple[RouteFinding, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.findings)
+
+    def by_check(self, check: str) -> tuple[RouteFinding, ...]:
+        return tuple(f for f in self.findings if f.check == check)
+
+
+def lint_routes(registry: PlaneRegistry) -> RouteReport:
+    """L1, L4 and L5 over every registered route -- pure, framework-free. See above."""
+    by_path: dict[str, list[Registration]] = {}
+    for registration in registry.routes().values():
+        by_path.setdefault(registration.endpoint.path, []).append(registration)
+
+    findings: list[RouteFinding] = []
+    for path, registrations in sorted(by_path.items()):
+        first = registrations[0]
+        if first.alias_of is not None or path.startswith(_WELL_KNOWN):
+            continue
+        route = f"{','.join(sorted(r.endpoint.method for r in registrations))} {path}"
+        segments = path.strip("/").split("/")
+        second = segments[1] if len(segments) > 1 else ""
+        second_literal = second.split(":", 1)[0]
+
+        for check, rule, detail in (
+            _prefix_finding(first, second_literal),
+            _mock_finding(registrations, second_literal),
+            _casing_finding(path),
+        ):
+            if detail:
+                findings.append(RouteFinding(rule=rule, check=check, route=route, detail=detail))
+    return RouteReport(tuple(findings))
+
+
+def _prefix_finding(r: Registration, second: str) -> tuple[str, str, str | None]:
+    rule = ("L1", "C-051 §4")
+    if second == "mock":
+        return (*rule, None)  # L5's
+    expected = _PLANE_PREFIX.get(r.plane)
+    if expected is not None and second != expected:
+        return (*rule, f"a {r.plane} route belongs under /v<n>/{expected}/")
+    if r.plane == USER and second in _PREFIXES - {"ops"}:
+        return (*rule, f"a USER route carries no plane prefix; /{second}/ names another plane")
+    if r.plane == USER and second == "ops" and r.actor_types != frozenset({"OPERATOR"}):
+        return (*rule, "/ops/ is for a route admitting only OPERATOR (C-052 §8)")
+    return (*rule, None)
+
+
+def _mock_finding(registrations: list[Registration], second: str) -> tuple[str, str, str | None]:
+    rule = ("L5", "C-051 §4")
+    dev = any(r.dev_only for r in registrations)
+    if second == "mock" and not dev:
+        return (*rule, "a /mock/ route not mounted dev_only=True reaches every build")
+    if dev and second != "mock":
+        return (*rule, "a dev_only route belongs under /v<n>/mock/")
+    return (*rule, None)
+
+
+def _casing_finding(path: str) -> tuple[str, str, str | None]:
+    rule = ("L4", "C-068 §1")
+    bad = [
+        piece
+        for segment in _PARAM.sub("", path).strip("/").split("/")
+        for piece in segment.split(":")
+        if piece and not _CASING.match(piece)
+    ]
+    if bad:
+        return (*rule, f"not lowercase-hyphenated: {', '.join(repr(p) for p in bad)}")
+    return (*rule, None)
