@@ -45,6 +45,11 @@ class Principal:
     user_ref: str
     entitlements: list[str] = field(default_factory=list)
     session_ref: str | None = None
+    #: The trust levels as auth reported them. ⚠ On a ROUTINE operation while auth is
+    #: unreachable, the resolver serves what is in the cache (C-017, RUL-212), and these come
+    #: from it -- not live, beyond an elapsed elevation being collapsed. falcon-auth's own assurance checks
+    #: (``require_elevated``, the operation verify) always read auth live and refuse when it is
+    #: down; a HOST check reading these fields owns its own conformance to RUL-072 / C-066 §2.
     session_trust_level: int | None = None
     device_trust_level: int | None = None
     trust_elevated_until: str | None = None

@@ -32,8 +32,14 @@ The mapping a host is expected to apply -- statuses and codes from the platform 
                                         retried; the app goes to onboarding (RUL-187)
     CallbackSignatureInvalid -> 401 PLAT0111   a callback's HMAC missing or wrong (C-031)
     CallbackStale     -> 401 PLAT0112   a signed callback outside the replay window (C-031)
-    AuthzUnavailable  -> 503            authorization state could not be established. Retry with
-                                        backoff
+    AuthzUnavailable  -> 503 PLAT0302   auth is unavailable: refused, down, draining. Retry with
+                                        backoff (C-066 §3)
+    UpstreamTimeout   -> 504 PLAT0303   auth timed out AFTER the request was sent -- an unknown
+                                        outcome (C-066 §3, C-050 §4). An AuthzUnavailable
+    UpstreamBadResponse -> 502 PLAT0304 auth answered something unusable: a 3xx (C-064), a feed
+                                        failing validation, an unmapped status. An AuthzUnavailable
+    AuthzMisconfigured -> 500 PLAT0301  auth refused THIS SERVICE (403: our certificate lacks the
+                                        capability) -- ours to fix, never a user denial (C-066 §4)
 
 and, from the plane middleware, a wrong-plane credential -> 404 PLAT0006, the router miss
 (RUL-158) -- raised as Falcon's own `HTTPRouteNotFound`, so the host's router-miss handler renders it.
@@ -53,10 +59,10 @@ CODE, not the status -- `PLAT0109` means "raise a challenge", `PLAT0101` means "
 deliberately does not subclass `CapabilityDenied`, so a host maps it explicitly, and `required` /
 `present` ride in `extras` for the client to branch on.
 
-**A `403` from the auth service is `AuthzUnavailable`, never a denial.** It means *our* client
-certificate lacks the `trust:read` scope -- a deployment fault. Surfacing it as a user denial would
-turn a misconfigured rollout into "every user suddenly lacks permissions", which is the wrong page to
-be woken up to.
+**A `403` from the auth service is `AuthzMisconfigured` (`500 PLAT0301`), never a denial.** It means
+*our* client certificate lacks the `trust:read` scope -- a deployment fault (C-066 §4). Surfacing it
+as a user denial would turn a misconfigured rollout into "every user suddenly lacks permissions",
+which is the wrong page to be woken up to.
 """
 from typing import Any, ClassVar
 
@@ -64,6 +70,7 @@ from .wire import FalconAuthError
 
 __all__ = (
     "AuthzError",
+    "AuthzMisconfigured",
     "AuthzUnavailable",
     "CallbackSignatureInvalid",
     "CallbackStale",
@@ -75,6 +82,8 @@ __all__ = (
     "SubjectNotReachable",
     "TokenExpired",
     "Unauthenticated",
+    "UpstreamBadResponse",
+    "UpstreamTimeout",
 )
 
 
@@ -203,9 +212,45 @@ class CallbackStale(Unauthenticated):
 
 
 class AuthzUnavailable(AuthzError):
-    """Authorization state could not be established -- the trust source is unreachable or misconfigured."""
+    """Authorization state could not be established because auth is unavailable -- refused,
+    down, draining (C-066 §3: ``503 PLAT0302`` with ``Retry-After``).
+
+    The two subclasses below say more precisely WHAT happened; both are still "auth could not
+    give a usable answer", so a host catching this catches them, and the resolver's C-017 path
+    (last-good for a routine operation) treats them alike.
+    """
 
     plat_code: ClassVar[str] = "PLAT0302"
+
+
+class UpstreamTimeout(AuthzUnavailable):
+    """Auth timed out after the request was sent: the outcome is UNKNOWN (C-066 §3, C-050 §4).
+
+    ``504 PLAT0303``. For a read the difference is only honesty; for the operation verify --
+    which consumes a step-up challenge -- it matters: the challenge may have been spent.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0303"
+
+
+class UpstreamBadResponse(AuthzUnavailable):
+    """Auth answered, with something unusable: a ``3xx`` (C-064 §2), a body that is not the
+    expected shape, or a status this package does not map (C-066 §3). ``502 PLAT0304``."""
+
+    plat_code: ClassVar[str] = "PLAT0304"
+
+
+class AuthzMisconfigured(AuthzError):
+    """Auth refused THIS SERVICE -- a ``403``: our certificate lacks the capability the call
+    needs (``trust:read``, ``step_up:verify``). C-066 §4: a refusal of the caller itself is a
+    misconfiguration, ``500 PLAT0301``.
+
+    ⛔ Not an ``AuthzUnavailable``: auth is reachable, and serving a routine operation from the
+    last-good copy would hide a broken deployment until the copy expired. ⛔ Never a user
+    denial either -- that would read as "every user lost their permissions" in a bad rollout.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0301"
 
 
 class StepUpRequired(AuthzError):

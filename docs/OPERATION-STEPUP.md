@@ -84,7 +84,9 @@ client mints X-Operation-ID, runs step-up under it     challenge -> PASSED
             │
             ├─ POST …/operations/{id}:verify        CONSUMES the challenge
             │     410 / 8501  ──►  OperationChallengeMiss
-            │     403         ──►  AuthzUnavailable   our cert lacks step_up:verify
+            │     403         ──►  AuthzMisconfigured 500 PLAT0301: our cert lacks step_up:verify
+            │     5xx / refused ──► AuthzUnavailable 503 · timeout after send ──► UpstreamTimeout
+            │     504 (the challenge may be spent) · 3xx / bad shape ──► UpstreamBadResponse 502
             │
             ├─ purpose != expected_purpose     ──►  OperationPurposeMismatch
             ├─ request_body_hash != ours       ──►  OperationBodyMismatch

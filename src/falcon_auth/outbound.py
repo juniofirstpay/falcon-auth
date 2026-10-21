@@ -22,6 +22,18 @@ C-064 (`v34`, RUL-192), as it lands on those two calls:
         any session with only ``get(url, params=, headers=)`` / ``post(url, data=, headers=)``,
         the shape such a wrapper exposes, and adds ``allow_redirects=False`` only for a plain
         ``aiohttp.ClientSession``.
+
+C-066 §3-§4 (`v37`), the answer by KIND when auth gives no usable answer -- one mapping for both
+calls, :func:`transport_failure` and :func:`status_failure`:
+
+    unavailable -- refused, connect timeout, 5xx    503 PLAT0302 + Retry-After  AuthzUnavailable
+    timed out AFTER the request was sent            504 PLAT0303                UpstreamTimeout
+    unusable -- 3xx, bad shape, unmapped status     502 PLAT0304                UpstreamBadResponse
+    auth refused THIS service (403)                 500 PLAT0301                AuthzMisconfigured
+
+The first three are ``AuthzUnavailable``s, so a routine operation still gets the last-good copy
+for each (C-017, unamended by RUL-212); the fourth is not -- a broken deployment is not
+hidden behind a cache. Auth's own codes stay in the log (C-048, C-066 §4-§5).
 """
 from __future__ import annotations
 
@@ -33,9 +45,27 @@ from typing import Any, Protocol
 import aiohttp
 from structlog import get_logger
 
-from .errors import AuthzUnavailable
+from .errors import (
+    AuthzError,
+    AuthzMisconfigured,
+    AuthzUnavailable,
+    UpstreamBadResponse,
+    UpstreamTimeout,
+)
 
-__all__ = ("OutboundSession", "get", "post", "refuse_redirect")
+__all__ = (
+    "OutboundSession",
+    "get",
+    "post",
+    "refuse_redirect",
+    "status_failure",
+    "transport_failure",
+)
+
+#: aiohttp's connect-phase timeout (3.10+): nothing was sent, so the outcome is known -- none.
+_CONNECT_TIMEOUT: tuple[type[BaseException], ...] = tuple(
+    t for t in (getattr(aiohttp, "ConnectionTimeoutError", None),) if t is not None
+)
 
 logger = get_logger("falcon_auth.outbound")
 
@@ -86,7 +116,31 @@ async def refuse_redirect(response: Any, *, call: str) -> None:
         "outbound redirect not followed", call=call, status=response.status,
         location=response.headers.get("Location"),
     )
-    raise AuthzUnavailable(f"{call}: auth answered {response.status}, a redirect (C-064)")
+    raise UpstreamBadResponse(f"{call}: auth answered {response.status}, a redirect (C-064)")
+
+
+def transport_failure(e: BaseException, *, call: str) -> AuthzUnavailable:
+    """The C-066 answer for a call that got no response at all.
+
+    A timeout is ``504`` -- an unknown outcome -- unless aiohttp can say it happened while
+    CONNECTING, before anything was sent: then auth is simply unavailable, ``503``. A timeout
+    that cannot be placed (the session's ``total``) is read as after-send: an unknown outcome is
+    the honest answer when nothing proves the request never left.
+    """
+    if _CONNECT_TIMEOUT and isinstance(e, _CONNECT_TIMEOUT):
+        return AuthzUnavailable(f"{call}: could not connect to auth in time")
+    if isinstance(e, TimeoutError):
+        return UpstreamTimeout(f"{call}: auth timed out after the request was sent")
+    return AuthzUnavailable(f"{call}: auth unreachable ({type(e).__name__})")
+
+
+def status_failure(status: int, *, call: str) -> AuthzError:
+    """The C-066 answer for a status the call does not otherwise map."""
+    if status == 403:
+        return AuthzMisconfigured(f"{call}: auth refused this service's certificate (403)")
+    if status >= 500:
+        return AuthzUnavailable(f"{call}: auth answered {status}")
+    return UpstreamBadResponse(f"{call}: auth answered {status}, which is not mapped")
 
 
 def _options(session: Any) -> dict[str, Any]:

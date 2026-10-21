@@ -75,6 +75,10 @@ PLAT_CODES: Mapping[str, PlatCode] = {
         PlatCode("PLAT0301", "internal_error", 500, "Something went wrong. Please try again."),
         PlatCode("PLAT0302", "service_unavailable", 503,
                  "Service is temporarily unavailable. Please try again."),
+        PlatCode("PLAT0303", "upstream_timeout", 504,
+                 "Service is temporarily unavailable. Please try again."),
+        PlatCode("PLAT0304", "upstream_bad_response", 502,
+                 "Service is temporarily unavailable. Please try again."),
     )
 }
 
