@@ -154,7 +154,6 @@ class AuthServiceResolver:
             actor_kind=context.actor_kind,
             session_kind=context.session_kind,
             delegations=tuple(context.delegations),
-            actor_type_assumed=context.actor_type_assumed,
         )
 
     # ── the composition, now one half ────────────────────────────────────────────

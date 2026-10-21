@@ -39,6 +39,7 @@ from falcon_auth.trustcontext import Delegation
 
 GRANTS = {
     "CUSTOMER_GRANT": GrantRow("CUSTOMER", "self"),
+    "ONBOARDING_GRANT": GrantRow("CUSTOMER", "self"),
     "DELEGATED_CUSTOMER_GRANT": GrantRow("CUSTOMER", "subject"),
     "CUSTOMER_IMPERSONATION_GRANT": GrantRow("OPERATOR", "subject", "AGENT"),
     "AGENT_GRANT": GrantRow("OPERATOR", "unbound", "AGENT"),
@@ -88,12 +89,6 @@ def test_an_unreachable_subject_is_one_refusal(subject):
 def test_an_actor_type_the_route_does_not_admit_is_refused():
     with pytest.raises(ActorTypeNotAdmitted):
         sel(CUSTOMER, {"OPERATOR"})
-
-
-def test_an_assumed_customer_never_opens_an_operator_route():
-    """RUL-162: under the C-052 §3 deviation, operator-only routes always refuse."""
-    with pytest.raises(ActorTypeNotAdmitted):
-        sel(replace(CUSTOMER, actor_type_assumed=True), {"OPERATOR"})
 
 
 def test_an_operator_only_route_counts_unbound_grants():
@@ -192,15 +187,18 @@ def test_require_needs_the_grant_register():
 
 # ─── end to end ──────────────────────────────────────────────────────────────
 
-REGISTRY = {"orders:read": "ORDER_READ", "refunds:create": "REFUND_CREATE"}
+REGISTRY = {"orders:read": "ORDER_READ", "refunds:create": "REFUND_CREATE",
+            "onboarding:start": "ONBOARDING_START", "orders:read_any": "ORDER_READ_ANY"}
 EXPANSION = {
     "CUSTOMER_GRANT": ["ORDER_READ"],
+    "ONBOARDING_GRANT": ["ONBOARDING_START"],
     "DELEGATED_CUSTOMER_GRANT": ["ORDER_READ"],
     "CUSTOMER_IMPERSONATION_GRANT": ["ORDER_READ"],
     "AGENT_GRANT": ["REFUND_CREATE"],
 }
 WHO = {"customer": CUSTOMER, "operator": OPERATOR, "shadow": SHADOW,
-       "mismatch": replace(CUSTOMER, entitlements=["AGENT_GRANT"])}
+       "mismatch": replace(CUSTOMER, entitlements=["AGENT_GRANT"]),
+       "onboarding": replace(CUSTOMER, entitlements=["ONBOARDING_GRANT"], delegations=())}
 
 
 def _jwt():
@@ -250,6 +248,10 @@ def _client():
           actor_types=BOTH)
     mount(registry, app, "/v1/ops/refunds", view("refunds:create")(), plane=planes.USER,
           actor_types={"OPERATOR"})
+    mount(registry, app, "/v1/onboarding", view("onboarding:start")(), plane=planes.USER,
+          actor_types={"CUSTOMER"})
+    mount(registry, app, "/v1/orders-any", view("orders:read_any")(), plane=planes.USER,
+          actor_types={"CUSTOMER"})
     return falcon.testing.TestClient(app)
 
 
@@ -313,3 +315,44 @@ def test_a_shadow_session_without_its_subject_is_the_subject_refusal():
 def test_a_grant_outside_the_actor_type_is_a_503():
     r = get("/v1/orders", "mismatch")
     assert r.status_code == 503 and r.json["code"] == "PLAT0302"
+
+
+# ─── RUL-187: signed up, not onboarded ───────────────────────────────────────
+
+
+def test_an_onboarding_session_on_a_customer_route_is_423_plat0114():
+    """Not 404 (the actor type IS admitted), not 403 (the app must branch to onboarding)."""
+    r = get("/v1/orders", "onboarding")
+    assert (r.status_code, r.json) == (423, {
+        "code": "PLAT0114", "message": "Please finish setting up your account to continue."})
+
+
+def test_an_onboarding_session_opens_its_onboarding_route():
+    r = get("/v1/onboarding", "onboarding")
+    assert (r.status_code, r.json["opened_by"]) == (200, "ONBOARDING_GRANT")
+
+
+def test_a_customer_does_not_open_the_onboarding_route():
+    """Only ONBOARDING_GRANT's `g` row opens it; a customer gets the ordinary denial."""
+    assert get("/v1/onboarding", "customer").json["code"] == "PLAT0102"
+
+
+def test_a_route_customer_grant_does_not_open_is_the_ordinary_denial():
+    """423 means 'onboard and this opens'. Where onboarding would not help, it is 403."""
+    r = get("/v1/orders-any", "onboarding")
+    assert (r.status_code, r.json["code"]) == (403, "PLAT0102")
+
+
+def test_an_onboarding_session_naming_a_subject_is_the_subject_refusal():
+    assert get("/v1/orders", "onboarding", subject="u-2").json["code"] == "PLAT0008"
+
+
+def test_an_onboarding_session_on_an_ops_route_is_the_router_miss():
+    assert get("/v1/ops/refunds", "onboarding").status_code == 404
+
+
+def test_the_register_must_list_onboarding_grant():
+    """Auth issues it to every new user. Missing from the copy, every one of them would 503."""
+    without = {k: v for k, v in GRANTS.items() if k != "ONBOARDING_GRANT"}
+    with pytest.raises(ValueError, match="ONBOARDING_GRANT"):
+        build_enforcer(REGISTRY, expansion=EXPANSION, grants=without)

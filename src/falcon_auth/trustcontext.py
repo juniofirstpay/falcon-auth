@@ -39,13 +39,9 @@ window a demoted device can hide inside.
 
 THE SCHEMA IS THE PLATFORM'S: `registry/TRUST-CONTEXT.md` (normative, RUL-162-165). Besides the
 session and trust fields it requires `grants`, `actor_type` (C-052), `actor_kind` iff OPERATOR,
-`session_kind` and `delegations` (C-053). A missing required field is never defaulted (S4) --
-except under the one recorded deviation, `assume_customer_actor_type` (C-052 §3, RUL-162).
-
-KNOWN BREAK, recorded rather than worked around: auth's feed (`05ebd8c`) carries **no `grants`**
-and none of the C-052/C-053 fields yet, so `TrustContext` fails validation against a live auth on
-every call. Closing it is a build at auth, owed under the schema -- not a local edit. The
-deviation covers `actor_type` (and the C-053 fields that ship with it); it never covers `grants`.
+`session_kind` and `delegations` (C-053). A missing required field is never defaulted (S4).
+The one recorded deviation -- an absent `actor_type` read as CUSTOMER (C-052 §3, RUL-162) -- has
+ENDED (RUL-188 6): auth's feed emits `actor_type`, `session_kind` and `delegations` (`fedda23`).
 
 The field is typed REQUIRED deliberately in the face of that. Making it optional would turn a
 service that cannot resolve anybody into one that silently resolves everybody to "holds nothing"
@@ -74,7 +70,6 @@ from typing import (
 from pydantic import (
     ConfigDict,
     BaseModel,
-    Field,
     ValidationError,
     field_validator,
     model_validator,
@@ -198,8 +193,8 @@ class TrustContext(BaseModel):
 
     ``extra="allow"``: auth may add fields without breaking us (S4: additive only, by ruling).
     ⛔ A missing REQUIRED field is never defaulted (S4) -- it fails validation, which the client
-    turns into a loud 503 -- except under the one recorded deviation, see
-    :meth:`from_feed`'s ``assume_customer_actor_type``.
+    turns into a loud 503. The C-052 §3 deviation that once filled ``actor_type`` has ended
+    (RUL-188 6).
     """
 
     model_config = ConfigDict(extra="allow")
@@ -229,18 +224,6 @@ class TrustContext(BaseModel):
     actor_kind: ActorKind | None = None
     session_kind: SessionKind
     delegations: list[Delegation]
-    #: True only when ``actor_type`` was ABSENT and assumed CUSTOMER under the recorded C-052 §3
-    #: deviation (RUL-162). Never set from the wire.
-    actor_type_assumed: bool = Field(default=False, exclude=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _never_from_the_wire(cls, data: Any) -> Any:
-        # `actor_type_assumed` is set by `from_feed` alone. A response carrying it is ignored,
-        # so nothing upstream can mark a session as "assumed" -- or un-mark one.
-        if isinstance(data, dict) and "actor_type_assumed" in data:
-            data = {k: v for k, v in data.items() if k != "actor_type_assumed"}
-        return data
 
     @model_validator(mode="after")
     def _schema_rules(self) -> "TrustContext":
@@ -261,33 +244,13 @@ class TrustContext(BaseModel):
         return self
 
     @classmethod
-    def from_feed(cls, data: Any, *, assume_customer_actor_type: bool = False) -> "TrustContext":
-        """Parse a trust-context response, strictly -- with the one recorded deviation.
+    def from_feed(cls, data: Any) -> "TrustContext":
+        """Parse a trust-context response, strictly (S4): a missing required field is an error.
 
-        :param assume_customer_actor_type: the C-052 §3 deviation (RUL-162, platform-conventions
-            #23): while auth's feed does not yet carry ``actor_type``, its absence is read as
-            ``CUSTOMER``. **Off by default.** A service that turns it on records a C-052
-            exception in its ``exceptions/<service>.md``, and it **expires at whichever comes
-            first: auth emitting ``actor_type``, or auth enabling any non-customer identity**.
-
-            It covers only what auth has not shipped alongside ``actor_type``: an absent
-            ``session_kind`` is read as ``NORMAL`` and absent ``delegations`` as ``[]`` -- the
-            deny direction (no shadow session, no subject reached). ⚠ That extension is this
-            package's reading of RUL-162, put to the platform. ``grants`` is never defaulted.
-            The route rule -- an assumed CUSTOMER never opens an OPERATOR-only route -- follows
-            from the actor-type guard, since the assumed type IS customer. Logged every time.
+        The C-052 §3 deviation (``assume_customer_actor_type``) has ended: auth emits
+        ``actor_type``, ``session_kind`` and ``delegations`` (RUL-188 6, ``fedda23``).
         """
-        if not assume_customer_actor_type or not isinstance(data, dict) or "actor_type" in data:
-            return cls.model_validate(data)
-        filled = {"session_kind": "NORMAL", "delegations": [], **data, "actor_type": "CUSTOMER"}
-        logger.warning(
-            "trust_context_actor_type_assumed",
-            session_ref=data.get("session_ref"),
-            deviation="C-052 §3 (RUL-162): absent actor_type read as CUSTOMER",
-        )
-        context = cls.model_validate(filled)
-        object.__setattr__(context, "actor_type_assumed", True)
-        return context
+        return cls.model_validate(data)
 
     def project(self, now: datetime | None = None) -> "TrustContext":
         """Collapse an elevation window that has passed, matching auth's own read-path projection.
@@ -328,7 +291,7 @@ class HttpTrustContextClient:
         *,
         path_template: str,
         api_version: str | None = None,
-        assume_customer_actor_type: bool = False,
+        assume_customer_actor_type: bool | None = None,
     ) -> None:
         """
         :param session_getter: returns the host's already-configured mTLS session -- a plain
@@ -345,7 +308,16 @@ class HttpTrustContextClient:
             ``/v1`` (ppi-backend-auth#317, ``e8c4a13``). The version rides in ``path_template``
             alone (``/v1/internal/...``). Passing a value warns and sends nothing; a later release
             removes the argument.
+        :param assume_customer_actor_type: REMOVED. The C-052 §3 deviation ended (RUL-188 6).
+            Passing ``True`` refuses rather than being ignored, so a service that relied on it
+            learns the feed is now read strictly.
         """
+        if assume_customer_actor_type:
+            raise ValueError(
+                "assume_customer_actor_type has ended (RUL-188 6): auth emits actor_type, "
+                "session_kind and delegations, and a missing required field is an error again "
+                "(registry/TRUST-CONTEXT.md S4). Drop the argument"
+            )
         if api_version is not None:
             warnings.warn(
                 "api_version is deprecated and ignored: C-039 drops X-API-Version (RUL-050) and "
@@ -356,8 +328,6 @@ class HttpTrustContextClient:
             )
         self._session_getter = session_getter
         self._path_template = path_template
-        # The recorded C-052 §3 deviation -- see TrustContext.from_feed. Off by default.
-        self._assume_customer = assume_customer_actor_type
         self._headers: dict[str, str] = {}
 
     async def fetch(self, session_ref: str, *, user_ref: str) -> TrustContext:
@@ -369,10 +339,7 @@ class HttpTrustContextClient:
             ) as response:
                 await outbound.refuse_redirect(response, call="trust-context")
                 if response.status == 200:
-                    return TrustContext.from_feed(
-                        await response.json(),
-                        assume_customer_actor_type=self._assume_customer,
-                    )
+                    return TrustContext.from_feed(await response.json())
                 await self._raise_for(response)
         except (SessionMiss, AuthzUnavailable):
             raise
