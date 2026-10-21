@@ -59,7 +59,7 @@ from .. import outbound
 from pydantic import BaseModel, ConfigDict, ValidationError
 from structlog import get_logger
 
-from ..errors import AuthzError, AuthzUnavailable
+from ..errors import AuthzError, AuthzMisconfigured, AuthzUnavailable, UpstreamBadResponse
 
 logger = get_logger(__name__)
 
@@ -321,21 +321,25 @@ class HttpOperationVerifier:
             ) as response:
                 await outbound.refuse_redirect(response, call="operation-verify")
                 if response.status == 200:
-                    return OperationVerification.model_validate(await response.json())
+                    try:
+                        data = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError) as e:
+                        raise UpstreamBadResponse(
+                            "operation-verify answered 200 without JSON"
+                        ) from e
+                    return OperationVerification.model_validate(data)
                 await self._raise_for(response, operation_id)
-        except (OperationChallengeMiss, AuthzUnavailable):
+        except AuthzError:
             raise
         except ValidationError as e:
             await logger.aerror("operation-verify response failed validation", exc_info=e)
-            raise AuthzUnavailable(
+            raise UpstreamBadResponse(
                 "operation-verify response did not match the expected shape"
             ) from e
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, TimeoutError) as e:
+            # A timeout here is 504: the challenge may have been CONSUMED (C-066 §3, C-050 §4).
             await logger.aerror("operation-verify transport failure", exc_info=e)
-            raise AuthzUnavailable("step-up source unreachable") from e
-        except TimeoutError as e:
-            await logger.aerror("operation-verify timed out", exc_info=e)
-            raise AuthzUnavailable("step-up source timed out") from e
+            raise outbound.transport_failure(e, call="operation-verify") from e
         raise AuthzUnavailable("operation-verify returned no usable response")  # pragma: no cover
 
     async def _raise_for(self, response: Any, operation_id: str) -> None:
@@ -360,11 +364,11 @@ class HttpOperationVerifier:
                 "this service?",
                 status=response.status,
             )
-            raise AuthzUnavailable("this service is not entitled to verify step-up operations")
+            raise AuthzMisconfigured("this service is not entitled to verify step-up operations")
         await logger.aerror(
             "operation-verify error response", status=response.status, code=code, body=body
         )
-        raise AuthzUnavailable(f"step-up source returned {response.status}")
+        raise outbound.status_failure(response.status, call="operation-verify")
 
 
 def _operation_error_code(body: Any) -> int | None:

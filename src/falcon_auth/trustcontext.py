@@ -82,8 +82,11 @@ import aiohttp
 from . import outbound
 
 from .errors import (
+    AuthzError,
+    AuthzMisconfigured,
     AuthzUnavailable,
     SessionMiss,
+    UpstreamBadResponse,
 )
 
 __all__ = (
@@ -339,21 +342,24 @@ class HttpTrustContextClient:
             ) as response:
                 await outbound.refuse_redirect(response, call="trust-context")
                 if response.status == 200:
-                    return TrustContext.from_feed(await response.json())
+                    try:
+                        data = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError) as e:
+                        raise UpstreamBadResponse("trust-context answered 200 without JSON") from e
+                    return TrustContext.from_feed(data)
                 await self._raise_for(response)
-        except (SessionMiss, AuthzUnavailable):
+        except AuthzError:
             raise
         except ValidationError as e:
             # The response shape changed under us -- most likely `grants` went missing. Loud,
-            # not silent: see the field comment above.
+            # not silent: see the field comment above. Unusable, so 502 (C-066 §3).
             await logger.aerror("trust-context response failed validation", exc_info=e)
-            raise AuthzUnavailable("trust-context response did not match the expected shape") from e
-        except aiohttp.ClientError as e:
+            raise UpstreamBadResponse(
+                "trust-context response did not match the expected shape"
+            ) from e
+        except (aiohttp.ClientError, TimeoutError) as e:
             await logger.aerror("trust-context transport failure", exc_info=e)
-            raise AuthzUnavailable("trust source unreachable") from e
-        except TimeoutError as e:
-            await logger.aerror("trust-context timed out", exc_info=e)
-            raise AuthzUnavailable("trust source timed out") from e
+            raise outbound.transport_failure(e, call="trust-context") from e
         raise AuthzUnavailable("trust-context returned no usable response")  # pragma: no cover
 
     async def _raise_for(self, response: aiohttp.ClientResponse) -> None:
@@ -381,9 +387,9 @@ class HttpTrustContextClient:
                 "trust-context refused our certificate -- is `trust:read` granted to this service?",
                 status=response.status,
             )
-            raise AuthzUnavailable("this service is not entitled to read trust context")
+            raise AuthzMisconfigured("this service is not entitled to read trust context")
         await logger.aerror("trust-context error response", status=response.status, code=code, body=body)
-        raise AuthzUnavailable(f"trust source returned {response.status}")
+        raise outbound.status_failure(response.status, call="trust-context")
 
 
 def _error_code(body: Any) -> int | None:

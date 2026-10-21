@@ -79,6 +79,7 @@ from .eastwest import (
 from .wire import PLAT_CODES, FalconAuthError, envelope
 from .errors import (
     AuthzError,
+    AuthzMisconfigured,
     AuthzUnavailable,
     CallbackSignatureInvalid,
     CallbackStale,
@@ -90,6 +91,8 @@ from .errors import (
     SubjectNotReachable,
     TokenExpired,
     Unauthenticated,
+    UpstreamBadResponse,
+    UpstreamTimeout,
 )
 from .trustcontext import (
     DEVICE_TRUST_ATTESTED,
@@ -217,6 +220,9 @@ __all__ = (
     "StepUpRequired",
     "SubjectNotReachable",
     "GrantRow",
+    "AuthzMisconfigured",
+    "UpstreamBadResponse",
+    "UpstreamTimeout",
     "TokenExpired",
     "PLAT_CODES",
     "FalconAuthError",
