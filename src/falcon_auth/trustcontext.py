@@ -80,6 +80,8 @@ from pydantic import (
     model_validator,
 )
 from structlog import get_logger
+import warnings
+
 import aiohttp
 
 from . import outbound
@@ -325,7 +327,7 @@ class HttpTrustContextClient:
         session_getter: Callable[[], "aiohttp.ClientSession | outbound.OutboundSession"],
         *,
         path_template: str,
-        api_version: str | None,
+        api_version: str | None = None,
         assume_customer_actor_type: bool = False,
     ) -> None:
         """
@@ -338,26 +340,25 @@ class HttpTrustContextClient:
             mounted, and under which API version -- and a default here would be a guess
             baked into a library, wrong for the first consumer that mounts it elsewhere.
             C-039 puts the version in the first path segment, so this is where it goes.
-        :param api_version: value for the ``X-API-Version`` header, or ``None`` to send none.
-            **Required, with no default.**
-
-            C-039 drops this header -- the version is the first path segment -- but auth has not
-            adopted C-039 and gates every endpoint on it (`validate_api_version`, 400/E1004 when
-            missing or unknown). So the correct value depends on which auth you are talking to,
-            and both plausible defaults are wrong somewhere: defaulting to ``"1"`` keeps sending
-            a header the convention retired, and defaulting to ``None`` 400s against auth as
-            deployed today. Neither failure is loud, so the host states it.
-
-            **TEMPORARY — tracked as falcon-auth#2.** When auth adopts C-039 this argument is
-            deleted rather than given a default, and the version rides in ``path_template``
-            alone (``/v1/internal/...``). ``None`` already means "send nothing", so a consumer
-            whose auth has moved can stop sending the header without waiting for that cleanup.
+        :param api_version: DEPRECATED and ignored (falcon-auth#2). C-039 drops the
+            ``X-API-Version`` header altogether (RUL-050), and auth retired it when it moved to
+            ``/v1`` (ppi-backend-auth#317, ``e8c4a13``). The version rides in ``path_template``
+            alone (``/v1/internal/...``). Passing a value warns and sends nothing; a later release
+            removes the argument.
         """
+        if api_version is not None:
+            warnings.warn(
+                "api_version is deprecated and ignored: C-039 drops X-API-Version (RUL-050) and "
+                "auth retired it (ppi-backend-auth#317). The version is in path_template "
+                "(/v1/...); drop the argument -- a later release removes it",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._session_getter = session_getter
         self._path_template = path_template
         # The recorded C-052 §3 deviation -- see TrustContext.from_feed. Off by default.
         self._assume_customer = assume_customer_actor_type
-        self._headers = {"X-API-Version": api_version} if api_version is not None else {}
+        self._headers: dict[str, str] = {}
 
     async def fetch(self, session_ref: str, *, user_ref: str) -> TrustContext:
         path = self._path_template.format(session_ref=session_ref)
