@@ -53,13 +53,17 @@ from .grants import GrantKind, GrantRegister, GrantRow, Selection, select
 from .resolver import (
     AuthenticatedUser,
     AuthServiceResolver,
+    DEFAULT_JTI_STALENESS,
     GrantAllResolver,
     Resolver,
+    check_current_jti,
 )
 
 __all__ = (
     "AuthenticatedUser",
     "AuthServiceResolver",
+    "check_current_jti",
+    "DEFAULT_JTI_STALENESS",
     "build_enforcer",
     "CapabilityEnforcer",
     "check_flatness",

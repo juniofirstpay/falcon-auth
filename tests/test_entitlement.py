@@ -9,7 +9,7 @@ import pytest
 
 from falcon_auth.entitlement.enforcer import build_enforcer, normalise_registry
 from falcon_auth.entitlement.resolver import AuthServiceResolver, GrantAllResolver
-from falcon_auth.errors import AuthzUnavailable, CapabilityDenied, SessionMiss
+from falcon_auth.errors import AuthzUnavailable, CapabilityDenied, SessionMiss, Unauthenticated
 from falcon_auth.principal import Principal
 from falcon_auth.trustcontext import (
     NullCache,
@@ -295,11 +295,14 @@ async def test_the_local_veto_is_the_only_subtractive_lever():
     assert p.entitlements == ["RETAIL_USER"], "suspended for the merchant grant, locally"
 
 
-async def test_a_token_with_no_session_claim_is_denied():
-    """An identity we cannot ask about. Fail closed rather than guess."""
+async def test_a_token_with_no_session_claim_is_refused_as_unauthenticated():
+    """An identity we cannot ask about. Fail closed rather than guess -- and as an invalid TOKEN,
+    401 PLAT0101 (C-078 §6), not the 403 authorization refusal it was before v0.10.0."""
     resolver = _resolver()
-    with pytest.raises(CapabilityDenied):
+    with pytest.raises(Unauthenticated) as e:
         await resolver.resolve(_User())
+    assert not isinstance(e.value, CapabilityDenied)
+    assert e.value.plat_code == "PLAT0101"
 
 
 async def test_the_trust_fields_travel_with_the_entitlements():
@@ -323,7 +326,8 @@ async def test_a_token_cannot_resolve_as_a_service_account():
     plane, where the CN allow-list carries its capabilities.
     """
     resolver = _resolver()
-    with pytest.raises(CapabilityDenied):
+    # No `sid`: refused as an invalid token (C-078 §6) -- never resolved from its own claims.
+    with pytest.raises(Unauthenticated):
         await resolver.resolve(_User(type="service-account", entitlements=["ORDER_READ_ANY"]))
 
 

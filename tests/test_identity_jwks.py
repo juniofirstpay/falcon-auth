@@ -44,6 +44,9 @@ def _token(key, kid: str, **overrides):
         "aud": AUDIENCE,
         "iat": now,
         "exp": now + 300,
+        # The C-078 §5 floor: `sid` and `jti` are required since v0.10.0.
+        "sid": "sess-1",
+        "jti": "jti-1",
     }
     claims.update(overrides)
     claims = {k: v for k, v in claims.items() if v is not None}
@@ -99,8 +102,8 @@ def test_authorization_claims_are_not_forwarded():
 
     # The claims are in the token...
     assert claims["entitlements"] == ["ORDER_READ_ANY"]
-    # ...and none of them reach the principal.
-    assert verifier.principal_claims(claims) == {}
+    # ...and none of them reach the principal (only the allowlist, plus the always-forwarded jti).
+    assert verifier.principal_claims(claims) == {"sid": "sess-1", "jti": "jti-1"}
 
 
 def test_session_claim_is_forwarded():
@@ -108,7 +111,7 @@ def test_session_claim_is_forwarded():
     store = JWKSStore(_Fetcher([jwk]))
     verifier = _verifier(store)
     claims = asyncio.run(verifier.verify(_token(key, "k1", sid="sess-9")))
-    assert verifier.principal_claims(claims) == {"sid": "sess-9"}
+    assert verifier.principal_claims(claims) == {"sid": "sess-9", "jti": "jti-1"}
 
 
 def test_sub_is_never_forwarded():
@@ -140,7 +143,7 @@ def test_forwarded_claims_override_is_honoured():
     store = JWKSStore(_Fetcher([jwk]))
     verifier = _verifier(store, forwarded_claims=frozenset({"tenant"}))
     claims = asyncio.run(verifier.verify(_token(key, "k1", tenant="acme", sid="s1")))
-    assert verifier.principal_claims(claims) == {"tenant": "acme"}
+    assert verifier.principal_claims(claims) == {"tenant": "acme", "jti": "jti-1"}
 
 
 # ── required claims (the hardening that existed in the other repo) ─────────────
@@ -161,8 +164,8 @@ def test_not_yet_valid_token_is_rejected():
         asyncio.run(_verifier(store).verify(_token(key, "k1", nbf=future)))
 
 
-def test_default_options_require_the_three_registered_claims():
-    assert set(DEFAULT_DECODE_OPTIONS["require"]) == {"iat", "exp", "sub"}
+def test_default_options_require_the_c078_floor():
+    assert set(DEFAULT_DECODE_OPTIONS["require"]) == {"iat", "exp", "sub", "sid", "jti"}
     assert DEFAULT_DECODE_OPTIONS["verify_nbf"] is True
 
 
@@ -430,7 +433,7 @@ def test_adapter_sets_the_user():
     assert asyncio.run(auth(_User, req, None)) is True
     assert req.context.user.id == "user-1"
     assert req.context.user.type == "user"
-    assert req.context.user.extra == {"sid": "s1"}
+    assert req.context.user.extra == {"sid": "s1", "jti": "jti-1"}
 
 
 def test_adapter_does_not_forward_authorization_claims():

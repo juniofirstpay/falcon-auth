@@ -50,6 +50,8 @@ moved; the second stays, and the reason they part company is that only one of th
   is enforced.
 """
 import hashlib
+import hmac
+import math
 from collections.abc import Callable
 from typing import (
     Any,
@@ -60,8 +62,9 @@ from structlog import get_logger
 
 from ..errors import (
     AuthzUnavailable,
-    CapabilityDenied,
     SessionMiss,
+    TokenSuperseded,
+    Unauthenticated,
 )
 from ..principal import Principal
 from ..trustcontext import (
@@ -71,11 +74,27 @@ from ..trustcontext import (
     TrustContextClient,
 )
 
-__all__ = ("AuthenticatedUser", "AuthServiceResolver", "GrantAllResolver", "Resolver")
+__all__ = (
+    "AuthenticatedUser",
+    "AuthServiceResolver",
+    "DEFAULT_JTI_STALENESS",
+    "GrantAllResolver",
+    "Resolver",
+    "check_current_jti",
+)
 
 logger = get_logger("authz")
 
 DEFAULT_SESSION_CLAIM = "sid"
+
+#: The token claim the current-token check reads off the principal. The verifier forwards it
+#: unconditionally (`identity.jwks.ALWAYS_FORWARDED`).
+JTI_CLAIM = "jti"
+
+#: C-078 §5 / RUL-264 Q-J5: the oldest trust context, in seconds, the current-token check may rely
+#: on. Default 60. ⚠ The last-good copy is up to 900 s old (`DEFAULT_LAST_GOOD_TTL`), so it is
+#: never good enough for this check.
+DEFAULT_JTI_STALENESS = 60.0
 
 
 class AuthenticatedUser(Protocol):
@@ -111,7 +130,21 @@ class AuthServiceResolver:
         expand: None = None,
         veto: Callable[[str, list[str]], list[str]] | None = None,
         session_claim: str = DEFAULT_SESSION_CLAIM,
+        jti_staleness: float = DEFAULT_JTI_STALENESS,
+        strict_current_jti: bool = False,
     ) -> None:
+        """
+        :param jti_staleness: the oldest trust context, seconds, the current-token check relies
+            on (C-078 §5, default 60). Older -- today only the last-good copy served during an
+            outage -- and the check cannot be made: lenient, it logs and passes; strict, it is
+            ``AuthzUnavailable`` (503), never a 401, because the token is not proven wrong.
+        :param strict_current_jti: the rollout switch (RUL-265 Q-J8). Off (lenient): a feed with
+            no ``current_jti`` logs and passes. On -- once auth emits the field -- the check must
+            be made: see :func:`check_current_jti` for what a missing ``current_jti`` answers.
+            A token whose ``jti`` differs from a present ``current_jti`` is refused either way.
+        """
+        if not jti_staleness >= 0:
+            raise ValueError(f"jti_staleness must be >= 0, got {jti_staleness!r}")
         if expand is not None:
             raise ValueError(
                 "the grant -> entitlement expansion is no longer a callable (C-038/RUL-075): "
@@ -123,6 +156,8 @@ class AuthServiceResolver:
         self._cache = cache
         self._veto = veto
         self._session_claim = session_claim
+        self._jti_staleness = jti_staleness
+        self._strict_current_jti = strict_current_jti
 
     async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
         """Resolve `user` to a `Principal`.
@@ -131,15 +166,27 @@ class AuthServiceResolver:
         is fresh now -- C6 removed the warm path -- so what the flag selects is what happens when
         the source is DOWN: a consequential operation fails closed, a routine one may serve the
         last-good copy. Nothing sets it until a service classifies its own operations.
+
+        Then the current-token check (C-078 §5, :func:`check_current_jti`), against a context no
+        older than ``jti_staleness``.
         """
         session_ref = user.get(self._session_claim)
         if not session_ref:
-            # No session claim: an identity we cannot ask about. §7 -- fail closed rather than guess.
-            await logger.awarning("no session claim on the token; denying", claim=self._session_claim)
-            raise CapabilityDenied("token carries no session reference")
+            # No session claim: an invalid TOKEN, not an authorization refusal (C-078 §6: a missing
+            # required claim is 401 PLAT0101). The verifier's floor refuses such a token before it
+            # gets here; this stays for a principal built some other way.
+            await logger.awarning("no session claim on the token; refusing", claim=self._session_claim)
+            raise Unauthenticated("token carries no session reference")
 
-        context = await self._context(str(session_ref), str(user.id), consequential=consequential)
+        context, age = await self._context(
+            str(session_ref), str(user.id), consequential=consequential,
+            max_age=self._jti_staleness,
+        )
         _assert_session_live(context)
+        await check_current_jti(
+            user.get(JTI_CLAIM), context, age=age,
+            jti_staleness=self._jti_staleness, strict=self._strict_current_jti,
+        )
         return self._principal(context)
 
     def _principal(self, context: TrustContext) -> Principal:
@@ -169,7 +216,12 @@ class AuthServiceResolver:
 
     # ── §10: freshness, and what happens when the source is down ─────────────────
 
-    async def _context(self, session_ref: str, user_ref: str, *, consequential: bool) -> TrustContext:
+    async def _context(self, session_ref: str, user_ref: str, *, consequential: bool,
+                       max_age: float | None = None) -> tuple[TrustContext, float]:
+        """The context, and its AGE in seconds: ``0.0`` for a fresh read, ``math.inf`` for the
+        last-good copy (its age is not recorded). ``max_age`` -- never serve a cached copy older
+        than it -- is accepted and not acted on: with no warm path, the only cached copy is the
+        last-good one, and the age it reports lets the caller refuse to rely on it."""
         # No warm path. Assurance is live (C-038/RUL-072): a cached trust level is one a demoted
         # device can keep transacting behind for the length of the window. `consequential` still
         # governs what happens when the source is DOWN, below -- it no longer selects between a
@@ -192,14 +244,14 @@ class AuthServiceResolver:
                 "trust source unreachable; serving last-good grants for a routine operation",
                 session_ref_hash=_ref_hash(session_ref),
             )
-            return last_good.project()
+            return last_good.project(), math.inf
 
         if context.session_state == SESSION_STATE_ENABLED:
             await self._cache.write(context)
         else:
             # Revoked, but answered 200 (see `_assert_session_live`): never a copy to fall back on.
             await self._forget(session_ref)
-        return context
+        return context, 0.0
 
     async def _forget(self, session_ref: str) -> None:
         try:
@@ -232,6 +284,74 @@ def _assert_session_live(context: TrustContext) -> None:
             "session is not enabled",
             session_state=context.session_state,
         )
+
+
+async def check_current_jti(
+    token_jti: Any,
+    context: TrustContext,
+    *,
+    age: float,
+    jti_staleness: float = DEFAULT_JTI_STALENESS,
+    strict: bool = False,
+) -> None:
+    """C-078 §5: refuse a token that is not the session's CURRENT token. Returns, or raises.
+
+    ``age`` is how old ``context`` is, seconds (``0.0`` fresh, ``math.inf`` unknown).
+
+    =====================================  ==========================  ===========================
+    case                                   lenient (rollout)           strict
+    =====================================  ==========================  ===========================
+    ``age > jti_staleness``                log, pass                   ``AuthzUnavailable`` 503
+    feed has no ``current_jti`` field      log, pass                   ``AuthzUnavailable`` 503
+    ``current_jti`` is null                log, pass                   ``TokenSuperseded`` 401
+    the token carries no ``jti``           ``Unauthenticated`` 401 [1] ``Unauthenticated`` 401
+    ``jti != current_jti``                 ``TokenSuperseded`` 401     ``TokenSuperseded`` 401
+    =====================================  ==========================  ===========================
+
+    [1] only when there is a ``current_jti`` to compare it with; strict, always.
+
+    - **Too old** is the dependency failing, not the token: the token is not proven wrong, so
+      ⛔ never a 401. Strict refuses as auth being unavailable (C-066 §3).
+    - **No field** means the feed predates auth#365 -- strict was switched on before auth
+      deployed: an outage-shaped misconfiguration, so 503, and the client's refresh would not
+      fix it. **Null** is auth's own answer for a session last minted before its column existed:
+      the token in hand predates it, and a refresh mints one auth names -- so ``PLAT0108``.
+    - **No ``jti`` on the token** is a missing required claim, ``PLAT0101`` (C-078 §6). The
+      verifier's floor refuses it first; this covers a principal built some other way.
+    - **Superseded** is ``PLAT0108`` (C-078 §6): refresh, or retry with the token already held.
+    """
+    if strict and not token_jti:
+        raise Unauthenticated("token carries no jti")
+    if age > jti_staleness:
+        if strict:
+            raise AuthzUnavailable(
+                "the trust context is too old for the current-token check",
+                age=age, jti_staleness=jti_staleness,
+            )
+        await logger.awarning(
+            "current-token check skipped: trust context too old",
+            age=age, jti_staleness=jti_staleness,
+            session_ref_hash=_ref_hash(context.session_ref),
+        )
+        return
+    current = context.current_jti
+    if current is None:
+        if not strict:
+            await logger.awarning(
+                "current-token check skipped: the trust context names no current_jti",
+                session_ref_hash=_ref_hash(context.session_ref),
+            )
+            return
+        if "current_jti" not in context.model_fields_set:
+            raise AuthzUnavailable("the trust-context feed carries no current_jti (strict check)")
+        raise TokenSuperseded("the session names no current token; refresh")
+    if not token_jti:
+        raise Unauthenticated("token carries no jti")
+    if not hmac.compare_digest(str(token_jti).encode(), current.encode()):
+        await logger.ainfo(
+            "superseded token refused", session_ref_hash=_ref_hash(context.session_ref),
+        )
+        raise TokenSuperseded("the token is not the session's current token")
 
 
 class GrantAllResolver:

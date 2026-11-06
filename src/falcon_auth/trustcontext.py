@@ -227,6 +227,11 @@ class TrustContext(BaseModel):
     actor_kind: ActorKind | None = None
     session_kind: SessionKind
     delegations: list[Delegation]
+    # C-078 §5 (auth#365, AUTH-ADR-223): the `jti` of the session's CURRENT access token. Optional
+    # here, not required, for the rollout (RUL-265 Q-J8): absent from a feed that predates it.
+    # Auth emits null for a session last minted before its column existed and not refreshed since.
+    # The resolver's current-token check reads it (`entitlement.resolver.check_current_jti`).
+    current_jti: str | None = None
 
     @model_validator(mode="after")
     def _schema_rules(self) -> "TrustContext":
