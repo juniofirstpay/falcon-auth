@@ -120,22 +120,25 @@ def test_projection_does_not_touch_an_unelevated_session():
 # ── the degradation store: not a read-through cache ───────────────────────────
 
 
-async def test_only_the_last_good_copy_is_written():
-    """C-038/RUL-072: assurance is live. The `grants:` and `trust:` halves are gone -- a cached
-    trust level is a window a demoted device keeps transacting inside, which is the exact hazard
-    the rule names. What remains is the degradation copy, read only when auth is unreachable."""
+async def test_one_copy_is_written_per_session():
+    """The `grants:` and `trust:` halves of the pre-C6 cache are gone: C-079 §6 serves the whole
+    context or none of it. One copy, read as the routine copy and as the last-good copy."""
     mem = _MemCache()
     cache = TrustContextCache(mem)
     await cache.write(_ctx())
     assert sorted(mem.store) == ["lastgood:sess-1"]
 
 
-async def test_there_is_no_read_path():
-    """Asserted rather than left implicit. A context cannot be assembled without its trust half,
-    and the trust half is never stored -- so a `read` would have to either serve stale assurance
-    or always miss, and neither is worth the shape of a working cache."""
-    cache = TrustContextCache(_MemCache())
-    assert not hasattr(cache, "read")
+async def test_the_read_path_returns_the_copy_and_its_age():
+    """C-079 §6 restored the routine read; the age is what the resolver judges it by."""
+    now = [1000.0]
+    cache = TrustContextCache(_MemCache(), clock=lambda: now[0])
+    await cache.write(_ctx())
+    now[0] += 12.5
+    found = await cache.read("sess-1")
+    assert found is not None
+    assert found[0].grants == ["RETAIL_USER"]
+    assert found[1] == 12.5
 
 
 async def test_last_good_survives_a_round_trip():
@@ -161,11 +164,12 @@ async def test_null_cache_always_misses():
     assert await cache.read_last_good("sess-1") is None
 
 
-async def test_the_last_good_ttl_is_the_only_one_left():
-    """There is no grants TTL and no trust TTL to compare it against any more."""
+async def test_the_two_ttls_are_last_good_and_routine():
+    """No grants TTL and no trust TTL: the routine TTL governs the whole copy (C-079 §6)."""
     import falcon_auth.trustcontext as tc
 
     assert tc.DEFAULT_LAST_GOOD_TTL == 900
+    assert tc.DEFAULT_ROUTINE_TTL == 60
     assert not hasattr(tc, "DEFAULT_TRUST_TTL")
     assert not hasattr(tc, "DEFAULT_GRANTS_TTL")
 

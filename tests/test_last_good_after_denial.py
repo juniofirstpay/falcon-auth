@@ -3,6 +3,9 @@
 The issue's sequence, replayed: t=0 fetch succeeds (copy written) -> t=10 auth denies (404/410,
 or a non-ENABLED state) -> t=20 auth unreachable. Before the fix the t=0 copy was served at
 t=20, on every worker sharing the cache, for up to the last-good TTL.
+
+These run with ``routine_ttl=0`` so every routine resolve reaches auth and the OUTAGE path is
+what is exercised. The routine copy's own destruction is `test_routine_trust_cache.py`.
 """
 from __future__ import annotations
 
@@ -65,7 +68,7 @@ class _User:
 
 def _setup():
     auth, mem = _Auth(), _Mem()
-    return auth, mem, AuthServiceResolver(auth, TrustContextCache(mem))
+    return auth, mem, AuthServiceResolver(auth, TrustContextCache(mem, routine_ttl=0))
 
 
 async def test_the_copy_serves_an_outage_while_the_session_is_live():
@@ -94,7 +97,7 @@ async def test_after_a_denial_an_outage_fails_closed(denial):
 async def test_the_denial_reaches_every_worker_sharing_the_cache():
     """The copy lives in the SHARED cache, so one worker's denial must end it for all."""
     auth, mem, worker_a = _setup()
-    worker_b = AuthServiceResolver(auth, TrustContextCache(mem))
+    worker_b = AuthServiceResolver(auth, TrustContextCache(mem, routine_ttl=0))
     await worker_b.resolve(_User())
     auth.next = SessionMiss("410")
     with pytest.raises(SessionMiss):

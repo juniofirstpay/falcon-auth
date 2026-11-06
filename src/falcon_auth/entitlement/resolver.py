@@ -50,6 +50,7 @@ moved; the second stays, and the reason they part company is that only one of th
   is enforced.
 """
 import hashlib
+import math
 from collections.abc import Callable
 from typing import (
     Any,
@@ -97,11 +98,14 @@ class AuthenticatedUser(Protocol):
 
 
 class Resolver(Protocol):
-    async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal: ...
+    async def resolve(
+        self, user: AuthenticatedUser, *, consequential: bool = False, fresh: bool = False
+    ) -> Principal: ...
 
 
 class AuthServiceResolver:
-    """Resolves against the trust source, with the §10 caching and availability posture."""
+    """Resolves against the trust source: fresh for consequential, cached within a TTL for routine,
+    last-good for routine when the source is down (C-017, C-079 §6 and §8)."""
 
     def __init__(
         self,
@@ -124,13 +128,19 @@ class AuthServiceResolver:
         self._veto = veto
         self._session_claim = session_claim
 
-    async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
+    async def resolve(
+        self, user: AuthenticatedUser, *, consequential: bool = False, fresh: bool = False
+    ) -> Principal:
         """Resolve `user` to a `Principal`.
 
-        `consequential` marks an operation for which the entitlement *is* the control. Every read
-        is fresh now -- C6 removed the warm path -- so what the flag selects is what happens when
-        the source is DOWN: a consequential operation fails closed, a routine one may serve the
-        last-good copy. Nothing sets it until a service classifies its own operations.
+        `consequential` marks an operation for which the entitlement *is* the control (C-017): its
+        trust context is read FRESH, and when the source is down it fails closed. A routine one
+        may be served the cached copy within the cache's `routine_ttl`, and the last-good copy
+        when the source is down (C-079 §6, §8).
+
+        `fresh` forces a fresh read for a routine operation too (C-079 §6: a service "may always
+        pull fresh"). It bypasses the routine copy only; what happens when the source is DOWN is
+        still the consequence class's to decide -- pass `consequential=True` to fail closed.
         """
         session_ref = user.get(self._session_claim)
         if not session_ref:
@@ -138,7 +148,10 @@ class AuthServiceResolver:
             await logger.awarning("no session claim on the token; denying", claim=self._session_claim)
             raise CapabilityDenied("token carries no session reference")
 
-        context = await self._context(str(session_ref), str(user.id), consequential=consequential)
+        context, _age = await self._context(
+            str(session_ref), str(user.id), consequential=consequential,
+            max_age=0.0 if fresh else None,
+        )
         _assert_session_live(context)
         return self._principal(context)
 
@@ -169,37 +182,64 @@ class AuthServiceResolver:
 
     # ── §10: freshness, and what happens when the source is down ─────────────────
 
-    async def _context(self, session_ref: str, user_ref: str, *, consequential: bool) -> TrustContext:
-        # No warm path. Assurance is live (C-038/RUL-072): a cached trust level is one a demoted
-        # device can keep transacting behind for the length of the window. `consequential` still
-        # governs what happens when the source is DOWN, below -- it no longer selects between a
-        # cached read and a fresh one, because there is no cached read to select.
+    async def _context(
+        self, session_ref: str, user_ref: str, *, consequential: bool,
+        max_age: float | None = None,
+    ) -> tuple[TrustContext, float]:
+        """The session's trust context, and its age in seconds.
+
+        The age is ``0.0`` for a fresh fetch, the real age of a cached or last-good copy, and
+        ``math.inf`` when unknown (a copy written by 0.9.x).
+
+        ``max_age`` tightens the ROUTINE read only: a cached copy is served while younger than
+        ``min(routine_ttl, max_age)``; ``0`` forces a fresh read. It does not bound the
+        last-good copy -- that is the outage path, and the caller judges it by the age returned.
+        """
+        if not consequential:
+            bound = self._cache.routine_ttl if max_age is None \
+                else min(self._cache.routine_ttl, max_age)
+            cached = await self._cached(session_ref) if bound > 0 else None
+            if cached is not None and cached[1] < bound:
+                return cached[0].project(), cached[1]
         try:
             context = await self._client.fetch(session_ref, user_ref=user_ref)
         except SessionMiss:
-            # Auth DENIED the session. Its last-good copy must not outlive the denial, or the
-            # next outage serves it again (falcon-auth#30).
+            # Auth DENIED the session. Its copy must not outlive the denial, or the next routine
+            # read serves it from cache, or the next outage serves it as last-good (falcon-auth#30).
             await self._forget(session_ref)
             raise
         except AuthzUnavailable:
             if consequential:
                 # The entitlement IS the control here. Fail closed.
                 raise
-            last_good = await self._cache.read_last_good(session_ref)
+            last_good = await self._cache.read(session_ref)
             if last_good is None:
                 raise
+            context, age = last_good
             await logger.awarning(
                 "trust source unreachable; serving last-good grants for a routine operation",
                 session_ref_hash=_ref_hash(session_ref),
+                age_s=None if math.isinf(age) else round(age, 1),
             )
-            return last_good.project()
+            return context.project(), age
 
         if context.session_state == SESSION_STATE_ENABLED:
             await self._cache.write(context)
         else:
-            # Revoked, but answered 200 (see `_assert_session_live`): never a copy to fall back on.
+            # Revoked, but answered 200 (see `_assert_session_live`): never a copy to serve.
             await self._forget(session_ref)
-        return context
+        return context, 0.0
+
+    async def _cached(self, session_ref: str) -> tuple[TrustContext, float] | None:
+        """The routine copy, or None. A cache that fails is a miss: the read goes to auth."""
+        try:
+            return await self._cache.read(session_ref)
+        except Exception as e:  # noqa: BLE001 -- an optimisation failing must not refuse anyone
+            await logger.awarning(
+                "trust-context cache read failed; reading fresh",
+                session_ref_hash=_ref_hash(session_ref), error=str(e),
+            )
+            return None
 
     async def _forget(self, session_ref: str) -> None:
         try:
@@ -284,7 +324,9 @@ class GrantAllResolver:
         self._actor_type = actor_type
         self._actor_kind = actor_kind
 
-    async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
+    async def resolve(
+        self, user: AuthenticatedUser, *, consequential: bool = False, fresh: bool = False
+    ) -> Principal:
         return Principal(
             user_ref=str(user.id),
             entitlements=list(self._entitlements),

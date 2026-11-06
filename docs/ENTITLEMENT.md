@@ -71,9 +71,10 @@ your app startup
 │  ├─ check_flatness       a name on both sides?      ──►  FlatnessError
 │  └─ check_grants_registered   an unlisted grant?    ──►  UnregisteredGrant
 │
-├─ AuthServiceResolver(client, cache, veto=...)                 resolver.py
+├─ AuthServiceResolver(client, TrustContextCache(cache, routine_ttl=60), veto=...)
+│                                                                resolver.py, trustcontext.py
 │
-└─ @falcon.before(require(enforcer, resolver, "orders:create"))
+└─ @falcon.before(require(enforcer, resolver, "orders:create", consequential=..., fresh=...))
       capability has no registry row?  ──►  ValueError AT DECORATION TIME
 ```
 
@@ -93,18 +94,24 @@ the require(...) hook runs
 │            never "anonymous is fine" -- an unauthenticated request reaching a
 │            gated route is a mounting error, not a permission question
 │
-├─ resolver.resolve(user, consequential=False)                  resolver.py
+├─ resolver.resolve(user, consequential=False, fresh=False)     resolver.py
 │  │
 │  ├─ session_ref = user.get("sid")
 │  │     absent  ──►  CapabilityDenied
 │  │             an identity we cannot ask about; fail closed rather than guess
 │  │
+│  ├─ routine, not fresh, and a copy younger than routine_ttl?   (C-079 §6)
+│  │     yes  ──►  serve it, projected -- no call to auth
+│  │
 │  ├─ client.fetch(session_ref, user_ref=user.id)
-│  │     LIVE, always -- there is no warm cache
+│  │     consequential, fresh=True, or no young-enough copy
 │  │     │
+│  │     ├─ ENABLED       ──►  write the copy, stamped with its fetch time
+│  │     ├─ 404/410, or a state other than ENABLED
+│  │     │                ──►  destroy the copy, SessionMiss (falcon-auth#30)
 │  │     └─ AuthzUnavailable?
 │  │          consequential  ──►  re-raise, fail closed
-│  │          routine        ──►  serve the last-good copy, logged loudly
+│  │          routine        ──►  serve the last-good copy (any age), logged loudly
 │  │                              none stored?  ──►  re-raise
 │  │
 │  ├─ _compose(user_ref, grants)
@@ -251,12 +258,30 @@ so the two can never disagree — asserted in the tests.
 Ordering cannot change the **verdict** (union, no deny effect) — only which of several sufficient
 subjects gets recorded.
 
-### Consequential operations fail closed
+### Freshness follows the consequence class (C-017, C-079 §6)
 
-Every trust read is live. What `consequential=True` selects is the behaviour when the source is
-**down**: a routine read may serve the last-good copy, loudly logged; a consequential one
-re-raises. Where the entitlement *is* the control, degrading to a stale answer is the wrong
-direction.
+**Consequential** (`consequential=True`): the trust context is read **fresh** at the point of use,
+and when the source is **down** the read re-raises -- fail closed. Where the entitlement *is* the
+control, degrading to a stale answer is the wrong direction.
+
+**Routine** (the default): the resolver may serve the session's cached copy while it is younger
+than `routine_ttl` -- `TrustContextCache(cache, routine_ttl=...)`, default **60 s**, `0` for
+always-fresh. With JWT, auth stays off the hot path as much as possible; this is what keeps it
+there. When the source is down, a routine read serves the last-good copy of any age (up to
+`last_good_ttl`, 900 s), loudly logged (C-079 §8, RUL-212).
+
+**Force fresh** (`fresh=True`, on `resolve()` or `require()`): a service may always pull fresh,
+whatever the class (C-079 §6). It skips the routine copy only; outage behaviour is still the
+class's -- set `consequential=True` to fail closed as well.
+
+What the routine window costs: the copy is the whole context, assurance included, so a session
+demoted or revoked at auth can keep passing **routine** gates on a cached copy for up to
+`routine_ttl`. A denial auth returns to any fresh read -- `SessionMiss`, or a state other than
+ENABLED -- destroys the copy for every worker sharing the cache, so it is then served neither as
+the routine copy nor as last-good. Step-up never reads through this cache (`docs/ASSURANCE.md`).
+
+Each copy carries its fetch time, so ages are real across workers. An entry written by 0.9.x has
+none: its age is unknown, so it is never served as fresh, only as last-good.
 
 ---
 
