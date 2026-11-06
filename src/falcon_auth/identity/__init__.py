@@ -21,6 +21,9 @@ from __future__ import annotations
 
 from .jwks import (
     DEFAULT_DECODE_OPTIONS,
+    DEFAULT_LEEWAY,
+    DEFAULT_MAX_TOKEN_LIFETIME,
+    REQUIRED_CLAIMS,
     InvalidToken,
     JWKSStore,
     JWKSVerifier,
@@ -29,6 +32,9 @@ from .jwks import (
 
 __all__ = (
     "DEFAULT_DECODE_OPTIONS",
+    "DEFAULT_LEEWAY",
+    "DEFAULT_MAX_TOKEN_LIFETIME",
+    "REQUIRED_CLAIMS",
     "InvalidToken",
     "JWKSStore",
     "JWKSVerifier",

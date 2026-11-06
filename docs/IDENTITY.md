@@ -40,9 +40,12 @@ your app startup
 │     the package makes no HTTP call and reads no configuration
 │
 ├─ JWKSVerifier(store, issuer=..., audience=...,                   jwks.py
-│               algorithms=["RS256"], leeway=...,
+│               algorithms=["RS256"], leeway=30.0,
+│               max_token_lifetime=3600.0, options=...,
 │               forwarded_claims=frozenset({...}))
 │     forwarded_claims is REQUIRED with no default -- see below
+│     issuer / audience empty, a negative leeway, a ceiling <= 0, or options
+│     switching off a mandatory check  ──►  ValueError: it refuses to start (C-078 §5)
 │
 ├─ await store.warm()                                              jwks.py
 │     eager fetch so the first request does not pay the latency
@@ -99,15 +102,21 @@ request with `Authorization: Bearer <token>`
       │
       ├─ jwt.decode(token, key.key,
       │             algorithms=["RS256"],          <-- PINNED, never read from the token
-      │             options=DEFAULT_DECODE_OPTIONS,
-      │             audience=..., issuer=..., leeway=...)
+      │             options=<consumer options MERGED over DEFAULT_DECODE_OPTIONS>,
+      │             audience=..., issuer=..., leeway=30)
       │     │
-      │     ├─ bad signature · expired · wrong iss · wrong aud · missing sub
+      │     ├─ bad signature · expired · wrong iss · wrong aud
+      │     │  · a floor claim missing (iat exp sub sid jti)
       │     │      ──►  InvalidToken(<the PyJWT error class name>)
       │     └─ ──►  claims
       │
+      ├─ the floor PyJWT does not check                            (C-078 §5)
+      │     sid / jti empty or not a string   ──►  InvalidToken("malformed_sid" / "malformed_jti")
+      │     int(exp) - floor(iat) > max_token_lifetime
+      │                                        ──►  InvalidToken("lifetime_exceeds_ceiling")
+      │
       └─ verifier.principal_claims(claims)
-            keeps ONLY the allowlisted names; `sub` is excluded deliberately
+            keeps ONLY the allowlisted names, plus `jti` always; `sub` is excluded deliberately
             │
             └─ the adapter builds the user and sets req.context.user
 ```
@@ -129,11 +138,41 @@ Both produce a token that verifies, if the verifier trusts the header's `alg`. P
 server-side makes both impossible: an RS256 verifier presented with an HS256 token simply fails,
 because it never asks the token what algorithm to use.
 
-### 2. `sub` is required, not optional metadata
+### 2. The required claims are a floor (C-078 §5)
 
-It is in `require`, alongside `iat` and `exp`. Without it, a validly-signed token with no `sub`
-would authenticate successfully and then fail deeper in the stack — a **500 where a 401
-belongs**. Requiring it moves the failure to the one place that can answer it properly.
+`iat`, `exp`, `sub`, `sid`, `jti` (`REQUIRED_CLAIMS`). A consumer's `options["require"]` is
+**merged into** the floor, never substituted for it: it may add a claim, ⛔ never remove one. Before
+`v0.10.0` a consumer's `options` replaced the defaults wholesale, so a consumer listing
+`["iat", "exp", "sub"]` accepted tokens with no session and no token id. Switching off
+`verify_signature`, `verify_exp`, `verify_iat`, `verify_iss` or `verify_aud` is a `ValueError` at
+construction.
+
+Each has a reason. Without `sub`, a validly-signed token would authenticate and then fail deeper in
+the stack — a **500 where a 401 belongs**. Without `sid`, the resolver had no session to ask about
+and answered `403` (an authorization refusal for an identity defect); now it is an invalid token,
+`401 PLAT0101`, at verification. Without `jti`, the current-token check has nothing to compare.
+
+Two tunables bound the token in time:
+
+| tunable | default | what |
+|---|---|---|
+| `max_token_lifetime` | 3600 s | `exp − iat` above it is refused, `PLAT0101`. Measured as auth measures it, `int(exp) − floor(iat)`: auth mints a millisecond `iat` |
+| `leeway` | 30 s | clock skew, for `exp`, `nbf` and `iat` (was 0) |
+
+### 2a. The current token (C-078 §5)
+
+A refresh supersedes the token it replaces, but a resource server verifying locally would accept
+the old one until its `exp`. The trust context names the session's **`current_jti`** (auth#365);
+the resolver (`entitlement/resolver.py`, `check_current_jti`) refuses a token whose `jti` is not
+it with **`401 PLAT0108`** (`TokenSuperseded`, a `TokenExpired`): the client refreshes, or retries
+with the token it already holds — ⛔ not `PLAT0101`, which logs the user out. `jti` is always
+forwarded onto the principal for this, whatever `forwarded_claims` says.
+
+The check relies on a trust context at most `jti_staleness` old (default 60 s), and the routine
+cache is bounded by the same value. A last-good copy served during an outage carries the check only
+while it is younger than that: see
+[`ENTITLEMENT.md`](ENTITLEMENT.md) for what lenient and strict do then, and while auth's feed names
+no current token.
 
 ### 3. `forwarded_claims` is required, with no default
 
@@ -181,8 +220,14 @@ All of them raise `InvalidToken`, and the adapter turns that into an unauthentic
 | `InvalidSignatureError` | signed by something other than the named key |
 | `ExpiredSignatureError` | past `exp` |
 | `InvalidIssuerError` / `InvalidAudienceError` | issued by, or for, somebody else |
-| `MissingRequiredClaimError` | no `sub`, `iat` or `exp` |
+| `MissingRequiredClaimError` | a floor claim absent: `iat`, `exp`, `sub`, `sid` or `jti` (or one the consumer added) |
+| `malformed_sid` / `malformed_jti` | present, but empty or not a string |
+| `lifetime_exceeds_ceiling` | `exp − iat` above `max_token_lifetime` |
 | `ImmatureSignatureError` | `nbf` says not yet valid |
+
+Every reason but `ExpiredSignatureError` is `401 PLAT0101`; that one is `401 PLAT0108` only when
+it failed **alone** (RUL-175) — an expired token that is also over-long, or missing a floor claim,
+is `PLAT0101`.
 
 `verify_nbf` is on while `nbf` is *not* in `require` — so a token without one stays valid, but a
 token that declares itself not-yet-valid is refused rather than ignored. `leeway` absorbs

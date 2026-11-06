@@ -18,24 +18,28 @@ Requires **mTLS + `require_service_capability("trust:read")`** on the calling se
 `403` here therefore means *our own* certificate is missing that capability: a deployment fault, mapped
 to `AuthzUnavailable`, never to a user denial.
 
-**Assurance is never cached.** C-038/RUL-072 rules the feed's two concerns apart: grants may be
-revalidated cheaply, but assurance is LIVE -- "no blanket TTL over the whole response: a demoted
-device must not keep transacting for the length of a cache window". This module previously held
-the trust half for 60 seconds, which is precisely that window.
+**Freshness follows the consequence class (C-079 §6, C-017).** A consequential operation reads
+the trust context FRESH at the point of use. A routine one may be served a cached copy within a
+tunable TTL (`routine_ttl`, default :data:`DEFAULT_ROUTINE_TTL` = 60 s), and a consumer may
+always force a fresh read for any operation (RUL-267 Q-F5). With JWT, auth stays off the hot path
+as much as possible: the routine read is what keeps it there.
 
-The convention's replacement for a TTL is revalidation -- `grant_epoch` on the grants and an
-`ETag` on the response -- and auth emits NEITHER today; the wire shape is an unratified proposal
-(Q121). With no way to revalidate cheaply, the only conformant option left is to not serve
-assurance from cache, so there is no warm read path here at all. Every resolve reaches the source.
+What this trades, recorded rather than hidden: the routine copy is the WHOLE context, assurance
+included, so a session demoted or revoked at auth may keep passing ROUTINE gates for up to
+`routine_ttl` on a worker holding a copy. C-038/RUL-072 named that window as the hazard of a
+blanket TTL; C-079 (v59, RUL-267/268) accepted it for routine operations only, and closes it for
+consequential ones by reading fresh. Step-up (`assurance/stepup.py`) is unaffected -- it reads
+auth directly and never through this cache, because a stale elevation refuses the user again.
 
-THE COST, recorded rather than hidden: routine reads that previously served from a warm cache
-now call auth on every request. That is a real load increase on the trust source, and it is what
-the convention asks for. The field-split cache returns the day auth ships `grant_epoch` + `ETag`,
-at which point the warm path becomes a conditional request rather than a timer.
+`grant_epoch` + `ETag` revalidation (RUL-072) would make the routine read a conditional request
+rather than a timer; auth emits no `grant_epoch` (RUL-134), so the timer is what there is.
 
-`read_last_good` is NOT that cache and stays. It serves only when the source is UNREACHABLE, only
-for routine operations, and logs a warning each time -- the degradation path (C-011), not a cache
-window a demoted device can hide inside.
+ONE stored copy per session, written after every successful ENABLED fetch, with its fetch time.
+It is read two ways: as the **routine** copy (served only while younger than `routine_ttl`, and
+younger than any tighter ``max_age`` the caller passes), and as the **last-good** copy when auth
+is UNREACHABLE (routine operations only, any age up to `last_good_ttl`, logged loudly -- the
+degradation path, C-011/C-079 §8/RUL-212). A session auth DENIES -- 404/410, or a state other
+than ENABLED -- has its copy destroyed, so it is served by neither (falcon-auth#30).
 
 THE SCHEMA IS THE PLATFORM'S: `registry/TRUST-CONTEXT.md` (normative, RUL-162-165). Besides the
 session and trust fields it requires `grants`, `actor_type` (C-052), `actor_kind` iff OPERATOR,
@@ -52,7 +56,7 @@ RENAMED from `entitlements`, which is what the two services this was ported from
 (RUL-074) rules that what auth emits is a coarse **grant**, never a service's entitlement, and
 X-09 rules the field is renamed rather than accommodated. `grants` is a plain list, and there is
 ⛔ no `grant_epoch` (RUL-134); the feed carries a strong `ETag` (S2), which this package does not
-use because it keeps no trust-context cache to revalidate.
+use yet: the routine copy expires on its TTL rather than revalidating.
 """
 
 from collections.abc import Callable
@@ -75,6 +79,9 @@ from pydantic import (
     model_validator,
 )
 from structlog import get_logger
+import json
+import math
+import time
 import warnings
 
 import aiohttp
@@ -94,6 +101,7 @@ __all__ = (
     "ActorType",
     "Cache",
     "DEFAULT_LAST_GOOD_TTL",
+    "DEFAULT_ROUTINE_TTL",
     "DEVICE_TRUST_ATTESTED",
     "DEVICE_TRUST_RECOGNIZED",
     "DEVICE_TRUST_BOUND",
@@ -227,6 +235,11 @@ class TrustContext(BaseModel):
     actor_kind: ActorKind | None = None
     session_kind: SessionKind
     delegations: list[Delegation]
+    # C-078 §5 (auth#365, AUTH-ADR-223): the `jti` of the session's CURRENT access token. Optional
+    # here, not required, for the rollout (RUL-265 Q-J8): absent from a feed that predates it.
+    # Auth emits null for a session last minted before its column existed and not refreshed since.
+    # The resolver's current-token check reads it (`entitlement.resolver.check_current_jti`).
+    current_jti: str | None = None
 
     @model_validator(mode="after")
     def _schema_rules(self) -> "TrustContext":
@@ -403,15 +416,27 @@ def _error_code(body: Any) -> int | None:
     return raw if isinstance(raw, int) else None
 
 
-DEFAULT_LAST_GOOD_TTL = 900     # only ever read when the source is down
+DEFAULT_LAST_GOOD_TTL = 900     # the outage fallback: read only when the source is down
+
+#: How long a ROUTINE operation may be served a cached trust context (C-079 §6, RUL-072 Q117).
+#: Neither the convention nor its rulings name a number; 60 s is the conservative choice -- the
+#: window this package held before C6, and C-078 §5's `jti_staleness` default, so a default
+#: configuration never serves a routine copy the current-token check could not also rely on.
+#: ``0`` turns the routine cache off (every read fresh, as in 0.9.x).
+DEFAULT_ROUTINE_TTL = 60
+
+#: The key the fetch time is stored under, beside the context's own fields. Inside the context's
+#: JSON rather than wrapped around it, so a 0.9.x worker sharing the cache during a rolling deploy
+#: still parses a new entry (``extra="allow"``) and keeps its outage fallback. Popped before
+#: validation, so it never reaches a :class:`TrustContext`.
+_FETCHED_AT = "falcon_auth_fetched_at"
 
 #: What :meth:`TrustContextCache.forget` writes over a session's last-good copy. The two-method
 #: :class:`Cache` has no delete, so an ended session's copy is OVERWRITTEN, never left to expire.
 _TOMBSTONE = "ended"
 
-# There is deliberately no trust TTL and no grants TTL. Assurance is live (C-038/RUL-072), and
-# with assurance uncacheable a grants-only entry can never be assembled into a context, so
-# holding one would be dead weight that reads like a working cache.
+# There is no separate grants TTL: the copy is the whole context, served whole for a routine
+# operation or not at all (C-079 §6). A grants-only entry could never be assembled into one.
 
 
 class Cache(Protocol):
@@ -505,14 +530,17 @@ class RedisCache:
 
 
 class TrustContextCache:
-    """The degradation store. **Not a read-through cache** -- see the module docstring.
+    """One copy per session, stamped with its fetch time, read two ways -- see the module docstring.
 
-    It holds one thing: the last context the source successfully returned, for the case where the
-    source later becomes unreachable. Nothing here is consulted while auth is answering.
+    - :meth:`read` -- the copy and its **age** in seconds. The resolver serves it to a ROUTINE
+      operation while ``age < routine_ttl`` (C-079 §6), and to a routine operation of any age
+      when auth is unreachable (the last-good path, C-017/RUL-212).
+    - :meth:`read_last_good` -- the same copy without its age, kept for callers of 0.9.x.
 
-    There is no `read`. Assurance is live (C-038/RUL-072), so a context cannot be assembled from
-    cache without serving a trust level that may already have been demoted -- which is the exact
-    hazard the rule names.
+    The age is real: the fetch time travels with the copy, so every worker sharing the cache
+    agrees on it. A copy with no fetch time -- written by 0.9.x -- is of **unknown** age,
+    ``math.inf``: never fresh, still a last-good copy. So is one stamped in the future (another
+    worker's clock ahead of ours): unknown, never fresh.
     """
 
     def __init__(
@@ -520,38 +548,82 @@ class TrustContextCache:
         cache: Cache,
         *,
         last_good_ttl: int = DEFAULT_LAST_GOOD_TTL,
+        routine_ttl: float = DEFAULT_ROUTINE_TTL,
+        clock: Callable[[], float] = time.time,
     ) -> None:
+        """
+        :param routine_ttl: seconds a routine operation may be served a cached copy; ``0`` turns
+            the routine cache off. Not a storage TTL: the entry lives for the longer of the two.
+        :param clock: wall-clock seconds -- shared across workers through the stored stamp, so
+            it must be wall time, not a monotonic clock. Injectable for tests.
+        """
+        if not (math.isfinite(routine_ttl) and routine_ttl >= 0):
+            raise ValueError(f"routine_ttl is a finite number of seconds >= 0, not {routine_ttl!r}")
         self._cache = cache
         self._last_good_ttl = last_good_ttl
+        self._routine_ttl = float(routine_ttl)
+        self._clock = clock
+        # The entry must outlive BOTH readings of it, and so must the tombstone that ends it.
+        self._storage_ttl = max(int(last_good_ttl), math.ceil(routine_ttl))
+
+    @property
+    def routine_ttl(self) -> float:
+        return self._routine_ttl
 
     async def write(self, context: TrustContext) -> None:
-        """Record this as the last good answer. Called after every successful fetch."""
+        """Record this as the session's current copy. Called after every successful ENABLED fetch."""
+        # exclude_unset: a field auth did not send stays absent on the way back. Otherwise a feed
+        # with no `current_jti` reads back as `current_jti: null`, which the strict current-token
+        # check answers differently (C-078 §5: absent is 503, null is PLAT0108).
+        payload = context.model_dump(mode="json", exclude_unset=True)
+        payload[_FETCHED_AT] = self._clock()
         await self._cache.set(
-            f"lastgood:{context.session_ref}", context.model_dump_json(), self._last_good_ttl
+            f"lastgood:{context.session_ref}", json.dumps(payload), self._storage_ttl
         )
 
     async def forget(self, session_ref: str) -> None:
-        """Destroy the last-good copy of a session auth has said is over (falcon-auth#30).
+        """Destroy the copy of a session auth has said is over (falcon-auth#30).
 
         Called when auth DENIES the session -- 404/410, or a state other than ENABLED. Without
-        it, the copy written before the denial is served again the moment auth becomes
-        unreachable, on every worker sharing the cache, for up to ``last_good_ttl``: a revoked
-        session transacting again during an outage, against C-038's live revocation.
+        it, the copy written before the denial is served again: to the next routine operation
+        (for up to ``routine_ttl``) and the moment auth becomes unreachable (for up to
+        ``last_good_ttl``), on every worker sharing the cache -- a revoked session transacting
+        again, against C-038's live revocation.
 
         It overwrites rather than deletes (the protocol has no delete), for as long as a copy
         could have lived. ⚠ It cannot stop a fetch that succeeded on another worker just BEFORE
-        the revocation from writing its copy just AFTER this; that window is one request wide,
-        and the next fetch's denial closes it.
+        the revocation from writing its copy just AFTER this. That copy is then served to routine
+        operations for up to ``routine_ttl`` (C-079 §6 accepts that window for routine reads),
+        and the next fresh read's denial -- any consequential operation -- closes it.
         """
-        await self._cache.set(f"lastgood:{session_ref}", _TOMBSTONE, self._last_good_ttl)
+        await self._cache.set(f"lastgood:{session_ref}", _TOMBSTONE, self._storage_ttl)
 
-    async def read_last_good(self, session_ref: str) -> TrustContext | None:
-        """The stale copy served when the source is unreachable -- routine operations only (§10)."""
+    async def read(self, session_ref: str) -> tuple[TrustContext, float] | None:
+        """The session's copy and its age in seconds (``math.inf`` if unknown), or None.
+
+        Unprojected: the caller projects the elevation window (:meth:`TrustContext.project`).
+        """
         raw = await self._cache.get(f"lastgood:{session_ref}")
         if raw is None or raw == _TOMBSTONE:
             return None
         try:
-            return TrustContext.model_validate_json(raw)
+            data = json.loads(raw)
+            fetched_at = data.pop(_FETCHED_AT, None) if isinstance(data, dict) else None
+            context = TrustContext.model_validate(data)
         except Exception:  # noqa: BLE001 -- a corrupt entry is a miss, never a crash
             return None
+        return context, self._age(fetched_at)
 
+    def _age(self, fetched_at: Any) -> float:
+        # bool is an int; a stamp is never one.
+        if not isinstance(fetched_at, (int, float)) or isinstance(fetched_at, bool):
+            return math.inf                      # a 0.9.x entry, or a mangled stamp
+        age = self._clock() - float(fetched_at)
+        if not math.isfinite(age) or age < 0:
+            return math.inf                      # stamped in our future: unknown, never fresh
+        return age
+
+    async def read_last_good(self, session_ref: str) -> TrustContext | None:
+        """The stale copy served when the source is unreachable -- routine operations only (§10)."""
+        found = await self.read(session_ref)
+        return found[0] if found is not None else None

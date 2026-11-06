@@ -71,9 +71,10 @@ your app startup
 │  ├─ check_flatness       a name on both sides?      ──►  FlatnessError
 │  └─ check_grants_registered   an unlisted grant?    ──►  UnregisteredGrant
 │
-├─ AuthServiceResolver(client, cache, veto=...)                 resolver.py
+├─ AuthServiceResolver(client, TrustContextCache(cache, routine_ttl=60), veto=...)
+│                                                                resolver.py, trustcontext.py
 │
-└─ @falcon.before(require(enforcer, resolver, "orders:create"))
+└─ @falcon.before(require(enforcer, resolver, "orders:create", consequential=..., fresh=...))
       capability has no registry row?  ──►  ValueError AT DECORATION TIME
 ```
 
@@ -93,19 +94,33 @@ the require(...) hook runs
 │            never "anonymous is fine" -- an unauthenticated request reaching a
 │            gated route is a mounting error, not a permission question
 │
-├─ resolver.resolve(user, consequential=False)                  resolver.py
+├─ resolver.resolve(user, consequential=False, fresh=False)     resolver.py
 │  │
 │  ├─ session_ref = user.get("sid")
-│  │     absent  ──►  CapabilityDenied
-│  │             an identity we cannot ask about; fail closed rather than guess
+│  │     absent  ──►  Unauthenticated (401 PLAT0101) -- an invalid token, C-078 §6
+│  │             the verifier's floor refuses it first; this covers a principal built elsewhere
 │  │
-│  ├─ client.fetch(session_ref, user_ref=user.id)
-│  │     LIVE, always -- there is no warm cache
-│  │     │
-│  │     └─ AuthzUnavailable?
-│  │          consequential  ──►  re-raise, fail closed
-│  │          routine        ──►  serve the last-good copy, logged loudly
-│  │                              none stored?  ──►  re-raise
+│  ├─ _context(session_ref, user.id, consequential, max_age=0 if fresh else jti_staleness)
+│  │  │  returns (context, age): 0.0 fresh, the copy's real age, inf if unknown (a 0.9.x copy)
+│  │  │
+│  │  ├─ routine, and a copy younger than min(routine_ttl, max_age)?   (C-079 §6)
+│  │  │     yes  ──►  serve it, projected -- no call to auth
+│  │  │
+│  │  └─ client.fetch(session_ref, user_ref=user.id)
+│  │        consequential, fresh=True, or no young-enough copy
+│  │        │
+│  │        ├─ ENABLED       ──►  write the copy, stamped with its fetch time
+│  │        ├─ 404/410, or a state other than ENABLED
+│  │        │                ──►  destroy the copy, SessionMiss (falcon-auth#30)
+│  │        └─ AuthzUnavailable?
+│  │             consequential  ──►  re-raise, fail closed
+│  │             routine        ──►  serve the last-good copy (any age), logged loudly
+│  │                                 none stored?  ──►  re-raise
+│  │
+│  ├─ session not ENABLED  ──►  SessionMiss
+│  │
+│  ├─ check_current_jti(user.get("jti"), context, age, ...)     C-078 §5
+│  │     see "The current token" below
 │  │
 │  ├─ _compose(user_ref, grants)
 │  │     apply the local veto -- the ONLY subtractive lever in the model
@@ -251,12 +266,60 @@ so the two can never disagree — asserted in the tests.
 Ordering cannot change the **verdict** (union, no deny effect) — only which of several sufficient
 subjects gets recorded.
 
-### Consequential operations fail closed
+### Freshness follows the consequence class (C-017, C-079 §6)
 
-Every trust read is live. What `consequential=True` selects is the behaviour when the source is
-**down**: a routine read may serve the last-good copy, loudly logged; a consequential one
-re-raises. Where the entitlement *is* the control, degrading to a stale answer is the wrong
-direction.
+**Consequential** (`consequential=True`): the trust context is read **fresh** at the point of use,
+and when the source is **down** the read re-raises -- fail closed. Where the entitlement *is* the
+control, degrading to a stale answer is the wrong direction.
+
+**Routine** (the default): the resolver may serve the session's cached copy while it is younger
+than `routine_ttl` -- `TrustContextCache(cache, routine_ttl=...)`, default **60 s**, `0` for
+always-fresh. With JWT, auth stays off the hot path as much as possible; this is what keeps it
+there. When the source is down, a routine read serves the last-good copy of any age (up to
+`last_good_ttl`, 900 s), loudly logged (C-079 §8, RUL-212).
+
+**Force fresh** (`fresh=True`, on `resolve()` or `require()`): a service may always pull fresh,
+whatever the class (C-079 §6). It skips the routine copy only; outage behaviour is still the
+class's -- set `consequential=True` to fail closed as well.
+
+What the routine window costs: the copy is the whole context, assurance included, so a session
+demoted or revoked at auth can keep passing **routine** gates on a cached copy for up to
+`routine_ttl`. A denial auth returns to any fresh read -- `SessionMiss`, or a state other than
+ENABLED -- destroys the copy for every worker sharing the cache, so it is then served neither as
+the routine copy nor as last-good. Step-up never reads through this cache (`docs/ASSURANCE.md`).
+
+Each copy carries its fetch time, so ages are real across workers. An entry written by 0.9.x has
+none: its age is unknown, so it is never served as fresh, only as last-good.
+
+### The current token (C-078 §5)
+
+Auth's trust context names the session's **`current_jti`** — the token its last refresh minted.
+After the session is live, the resolver compares the token's `jti` with it
+(`check_current_jti`). Two tunables on `AuthServiceResolver`:
+
+- `jti_staleness` (default **60 s**): the oldest trust context the check may rely on. It also
+  caps the routine cache read, so a `routine_ttl` above it never weakens the check. ⚠ A last-good
+  copy served in an outage can be up to 900 s old; past `jti_staleness` it does not carry the check.
+- `strict_current_jti` (default **off**): the rollout switch (RUL-265 Q-J8). Turn it on once
+  auth emits `current_jti`.
+
+| case | lenient (default) | strict |
+|---|---|---|
+| `jti == current_jti` | pass | pass |
+| `jti != current_jti` | **`401 PLAT0108`** (`TokenSuperseded`) | **`401 PLAT0108`** |
+| `jti != current_jti` on a **cached** copy | re-read auth once: a fresh mismatch is `PLAT0108`; a match passes and rewrites the copy; auth down is `503 PLAT0302` | same |
+| context older than `jti_staleness` (an old last-good copy, in an outage) | log, pass | `503 PLAT0302` — the dependency failed; the token is not proven wrong |
+| feed carries no `current_jti` field | log, pass | `503 PLAT0302` — strict before auth deployed |
+| `current_jti` is null (a session last minted before auth's column existed) | log, pass | `401 PLAT0108` — a refresh mints a token auth names |
+| principal has no `jti` | `401 PLAT0101` when there is a `current_jti` to compare | `401 PLAT0101` |
+
+A copy can be behind the token: a client that refreshed after the copy was written holds a `jti` the copy
+has never seen. A mismatch against a copy therefore never refuses on its own word: one fresh read decides.
+
+`PLAT0108`, not `PLAT0101`: the client refreshes, or retries with the token it already holds (a
+request racing its own refresh); `PLAT0101` would log the user out. Under strict, an outage no
+longer degrades a routine read to a last-good copy older than `jti_staleness` — the check cannot
+be made against it.
 
 ---
 

@@ -116,8 +116,8 @@ it fights the user.
 **The volume argument does not apply.** Step-up gates sit on the few routes that demand
 elevation. Those are precisely the routes where correctness is worth a round trip.
 
-> This is also why C6 removed the package's read-through cache entirely. Assurance being live is
-> not a property of this module alone; it is a property of the trust source.
+> The entitlement resolver's ROUTINE copy (C-079 §6, `docs/ENTITLEMENT.md`) does not reach here:
+> step-up reads auth through the plain client, never the cache, whatever `routine_ttl` is set to.
 
 ---
 

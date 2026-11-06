@@ -85,19 +85,20 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 654 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 751 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
 | `eastwest/` | verifier · errors · mtls |
-| `identity/` | JWKS store, verifier, Falcon authenticator |
+| `identity/` | JWKS store, verifier, Falcon authenticator; C-078 §5's verifier rules (#41): the required claims are a floor — `iat` `exp` `sub` `sid` `jti`, a consumer may add, never remove — a missing one `401 PLAT0101` at verification; a tunable lifetime ceiling (`max_token_lifetime`, 3600 s) and leeway (30 s) |
+| `entitlement/resolver.py` · current token | C-078 §5 (#41): a token whose `jti` is not the trust context's `current_jti` is `401 PLAT0108` (`TokenSuperseded`), against a context at most `jti_staleness` (60 s) old; lenient while the feed names no current token, `strict_current_jti=True` once auth does |
 | `adapters/authenticators.py` | configured credentials — `Selector`, `JWTAuthenticator` · `ReferenceAuthenticator` · `MTLSAuthenticator` · `HMACAuthenticator` · `CustomAuthenticator`, and a declared binding (`PROVEN_AT_PERIMETER`) for `DPoP` tokens (#6); a CALLBACK source's HMAC over the exact body bytes, `401 PLAT0111` missing or wrong, `PLAT0112` stale (C-031, #1 A7) |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks · actor types and grant kinds (C-052, C-053) |
 | `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, exactly one credential per route, `CLIENT` refused, and the wrong-plane `404 PLAT0006` over I/O-free credentials only (C-060, #11); every path opens with `/v<n>/` or refuses to mount, `/.well-known/` aside, with a vendor-held callback URL served as `alias_of=` its versioned twin until the vendor moves (C-039, RUL-135; #1 A9); `verify_app` returns the advisory route-table lint, plane prefix, casing and `mock` (C-051, C-068; RUL-206, #38) |
 
-**C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
+**C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and trust-context freshness by consequence class (C-017, C-079 §6): consequential reads fresh, routine reads from a cached copy within a tunable TTL (default 60 s), and `fresh=True` to force a fresh read anywhere. Step-up always reads live.
 
 **Still owed:** nothing in the package until auth emits grants. The expansion stays empty and the grant register stays empty until it does — by design, not by omission.
 
