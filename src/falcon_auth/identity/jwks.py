@@ -31,6 +31,7 @@ Typical wiring (see the consuming repo's ``app/auth.py``)::
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from typing import Any, Awaitable, Callable, Optional, TypedDict, cast
 
@@ -58,20 +59,46 @@ class JWTDecodeOptions(TypedDict):
     strict_aud: bool
 
 
-#: Decode options that fail closed. Consumers may pass their own, but these are the
-#: defaults every claim check is on and the three registered claims that matter are
-#: required.
+#: C-078 §5: the claims every access token must carry -- a **floor**. A consumer's
+#: ``options["require"]`` is merged INTO it, never substituted for it: a consumer may add a
+#: claim, ⛔ never remove one (RUL-265 Q-J3). A token missing any of them is an invalid token,
+#: ``401 PLAT0101``, at verification -- not an authorization refusal further down.
 #:
-#: ``sub`` is REQUIRED, not optional metadata: it is the only thing that says who the
-#: caller is, and routes turn it straight into an identifier. Without it here, a
-#: validly-signed token carrying no ``sub`` authenticates and the failure lands in the
-#: responder as an unhandled ``TypeError`` — a 500 where a 401 belongs.
+#: ``sub`` is the only thing that says who the caller is, and routes turn it straight into an
+#: identifier (without it a validly-signed token authenticates and fails in the responder as a
+#: 500); ``sid`` is what the resolver looks the session up by; ``jti`` is what the current-token
+#: check compares with the trust context's ``current_jti``; ``iat`` and ``exp`` bound the
+#: lifetime the ceiling is measured on.
+REQUIRED_CLAIMS: tuple[str, ...] = ("iat", "exp", "sub", "sid", "jti")
+
+#: C-078 §5: the checks no consumer may switch off. ``verify_iss`` and ``verify_aud`` because a
+#: verifier ⛔ never skips them; the rest because without them the floor and the lifetime
+#: ceiling are unenforceable.
+MANDATORY_CHECKS: tuple[str, ...] = (
+    "verify_signature", "verify_exp", "verify_iat", "verify_iss", "verify_aud",
+)
+
+#: C-078 §5: the default ceiling on ``exp - iat``, seconds. Above it a token is invalid
+#: (``PLAT0101``). Auth's mint refuses the same ceiling (AUTH-ADR-223).
+DEFAULT_MAX_TOKEN_LIFETIME = 3600.0
+
+#: C-078 §5: the default clock-skew leeway, seconds (was 0 before ``v0.10.0``).
+DEFAULT_LEEWAY = 30.0
+
+#: Claims :meth:`JWKSVerifier.principal_claims` forwards whatever the consumer's allowlist says
+#: -- in code, so still an allowlist (C-078 §5). ``jti`` only: the resolver's current-token check
+#: needs it on the principal.
+ALWAYS_FORWARDED: frozenset[str] = frozenset({"jti"})
+
+#: Decode options that fail closed: every claim check on, and the :data:`REQUIRED_CLAIMS` floor
+#: required. A consumer's ``options`` are MERGED over these (:func:`merged_decode_options`), so
+#: a consumer passing its own can add to ``require`` but never shrink it.
 #:
 #: ``verify_nbf`` is on: a token without ``nbf`` stays valid (it is not in ``require``),
 #: but a token that declares itself not-yet-valid is refused rather than ignored.
 #: ``leeway`` on the verifier absorbs ordinary clock skew.
 DEFAULT_DECODE_OPTIONS: JWTDecodeOptions = {
-    "require": ["iat", "exp", "sub"],
+    "require": list(REQUIRED_CLAIMS),
     "verify_signature": True,
     "verify_aud": True,
     "verify_iss": True,
@@ -80,6 +107,22 @@ DEFAULT_DECODE_OPTIONS: JWTDecodeOptions = {
     "verify_nbf": True,
     "strict_aud": False,
 }
+
+
+def merged_decode_options(options: Optional[JWTDecodeOptions]) -> JWTDecodeOptions:
+    """``options`` over :data:`DEFAULT_DECODE_OPTIONS`, with the C-078 §5 floor kept.
+
+    ``require`` is a union, floor first: a consumer's shorter list adds nothing and removes
+    nothing. Switching off one of :data:`MANDATORY_CHECKS` is a ``ValueError`` -- before
+    ``v0.10.0`` a consumer's options REPLACED the defaults, so a shorter ``require`` (or a
+    ``verify_aud=False``) silently made the verifier weaker than it read.
+    """
+    given: dict[str, Any] = dict(options or {})
+    for flag in MANDATORY_CHECKS:
+        if flag in given and not given[flag]:
+            raise ValueError(f"{flag}=False is refused: C-078 §5 puts it in every verifier's floor")
+    require = list(dict.fromkeys([*REQUIRED_CLAIMS, *given.get("require", ())]))
+    return cast(JWTDecodeOptions, {**DEFAULT_DECODE_OPTIONS, **given, "require": require})
 
 
 class JWKSStore:
@@ -299,7 +342,8 @@ class JWKSVerifier:
         audience: str,
         options: Optional[JWTDecodeOptions] = None,
         algorithms: Optional[list[str]] = None,
-        leeway: float = 0.0,
+        leeway: float = DEFAULT_LEEWAY,
+        max_token_lifetime: float = DEFAULT_MAX_TOKEN_LIFETIME,
         forwarded_claims: frozenset[str],
     ):
         """
@@ -313,14 +357,31 @@ class JWKSVerifier:
             skip-if-falsy guard quietly disabled them.
 
             Requiring them makes the omission a `TypeError` at construction rather than a
-            verifier that is weaker than it reads.
+            verifier that is weaker than it reads. An EMPTY value is a `ValueError` for the same
+            reason (C-078 §5: a verifier with either unset refuses to start).
+        :param options: PyJWT decode options, merged over :data:`DEFAULT_DECODE_OPTIONS` by
+            :func:`merged_decode_options` -- ``require`` is unioned with the
+            :data:`REQUIRED_CLAIMS` floor, and a mandatory check cannot be switched off.
+        :param leeway: clock-skew allowance, seconds, for ``exp``, ``nbf`` and ``iat``. Default
+            30 (C-078 §5).
+        :param max_token_lifetime: the ceiling on ``exp - iat``, seconds. Default 3600 (C-078
+            §5); above it the token is invalid (``PLAT0101``). Measured as auth and the gateway
+            measure it, ``int(exp) - floor(iat)`` -- auth mints a millisecond ``iat``
+            (AUTH-ADR-222), so the three agree at the boundary.
         """
+        if not issuer or not audience:
+            raise ValueError("issuer and audience must both be set (C-078 §5)")
+        if leeway < 0:
+            raise ValueError(f"leeway must be >= 0, got {leeway!r}")
+        if not max_token_lifetime > 0:
+            raise ValueError(f"max_token_lifetime must be > 0, got {max_token_lifetime!r}")
         self._store = store
-        self._options: JWTDecodeOptions = options or DEFAULT_DECODE_OPTIONS
+        self._options: JWTDecodeOptions = merged_decode_options(options)
         self._algorithms = algorithms or ["RS256"]
         self._issuer = issuer
         self._audience = audience
         self._leeway = leeway
+        self._max_token_lifetime = max_token_lifetime
         self._forwarded_claims = forwarded_claims
 
     @property
@@ -356,7 +417,7 @@ class JWKSVerifier:
             decode_kwargs["leeway"] = self._leeway
 
         try:
-            return jwt.decode(
+            claims = jwt.decode(
                 token,
                 key.key,
                 algorithms=self._algorithms,
@@ -370,7 +431,7 @@ class JWKSVerifier:
             # first. Re-check everything else with expiry off: if that fails, the token was never
             # ours, and the caller gets that reason (PLAT0101), not "refresh".
             try:
-                jwt.decode(
+                stale = jwt.decode(
                     token,
                     key.key,
                     algorithms=self._algorithms,
@@ -379,24 +440,54 @@ class JWKSVerifier:
                 )
             except jwt.PyJWTError as other:
                 raise InvalidToken(type(other).__name__) from other
+            # An over-long or malformed token that has also expired did not fail on expiry ALONE.
+            self._check_floor(stale)
             raise InvalidToken(EXPIRED) from e
         except jwt.PyJWTError as e:
             raise InvalidToken(type(e).__name__) from e
+        self._check_floor(claims)
+        return claims
+
+    def _check_floor(self, claims: dict[str, Any]) -> None:
+        """What PyJWT's ``require`` leaves unchecked (C-078 §5, §6 -- each ``PLAT0101``).
+
+        - ``sid`` and ``jti`` are non-empty strings: PyJWT checks only that they are PRESENT,
+          and an empty or non-string value names no session and no token.
+        - ``exp - iat`` is within :paramref:`max_token_lifetime`, as ``int(exp) - floor(iat)``.
+        """
+        for name in ("sid", "jti"):
+            value = claims.get(name)
+            if not isinstance(value, str) or not value:
+                raise InvalidToken(f"malformed_{name}")
+        if int(claims["exp"]) - math.floor(claims["iat"]) > self._max_token_lifetime:
+            raise InvalidToken("lifetime_exceeds_ceiling")
 
     def principal_claims(self, claims: dict[str, Any]) -> dict[str, Any]:
         """The subset of ``claims`` permitted onto the authenticated user object.
 
         ``sub`` is excluded by design -- callers pass it explicitly as the user's
         id rather than forwarding it.
+
+        ``jti`` is ALWAYS forwarded (:data:`ALWAYS_FORWARDED`), whatever the consumer's list:
+        the resolver's current-token check (C-078 §5) compares it with the trust context's
+        ``current_jti``, and a consumer that forgot to list it would have the check silently
+        pass. It names a token, not a grant, so forwarding it proposes no authority.
         """
-        return {name: claims[name] for name in self._forwarded_claims if name in claims}
+        names = self._forwarded_claims | ALWAYS_FORWARDED
+        return {name: claims[name] for name in names if name in claims}
 
 
 __all__ = (
+    "ALWAYS_FORWARDED",
     "DEFAULT_DECODE_OPTIONS",
+    "DEFAULT_LEEWAY",
+    "DEFAULT_MAX_TOKEN_LIFETIME",
     "EXPIRED",
+    "MANDATORY_CHECKS",
+    "REQUIRED_CLAIMS",
     "JWTDecodeOptions",
     "InvalidToken",
     "JWKSStore",
     "JWKSVerifier",
+    "merged_decode_options",
 )

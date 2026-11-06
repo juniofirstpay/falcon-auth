@@ -96,16 +96,24 @@ the require(...) hook runs
 ├─ resolver.resolve(user, consequential=False)                  resolver.py
 │  │
 │  ├─ session_ref = user.get("sid")
-│  │     absent  ──►  CapabilityDenied
-│  │             an identity we cannot ask about; fail closed rather than guess
+│  │     absent  ──►  Unauthenticated (401 PLAT0101) -- an invalid token, C-078 §6
+│  │             the verifier's floor refuses it first; this covers a principal built elsewhere
 │  │
-│  ├─ client.fetch(session_ref, user_ref=user.id)
-│  │     LIVE, always -- there is no warm cache
-│  │     │
-│  │     └─ AuthzUnavailable?
-│  │          consequential  ──►  re-raise, fail closed
-│  │          routine        ──►  serve the last-good copy, logged loudly
-│  │                              none stored?  ──►  re-raise
+│  ├─ _context(session_ref, user.id, consequential, max_age=jti_staleness)
+│  │  │  returns (context, age): age 0.0 for a fresh read, inf for the last-good copy
+│  │  │
+│  │  └─ client.fetch(session_ref, user_ref=user.id)
+│  │        LIVE, always -- there is no warm cache
+│  │        │
+│  │        └─ AuthzUnavailable?
+│  │             consequential  ──►  re-raise, fail closed
+│  │             routine        ──►  serve the last-good copy, logged loudly
+│  │                                 none stored?  ──►  re-raise
+│  │
+│  ├─ session not ENABLED  ──►  SessionMiss
+│  │
+│  ├─ check_current_jti(user.get("jti"), context, age, ...)     C-078 §5
+│  │     see "The current token" below
 │  │
 │  ├─ _compose(user_ref, grants)
 │  │     apply the local veto -- the ONLY subtractive lever in the model
@@ -257,6 +265,30 @@ Every trust read is live. What `consequential=True` selects is the behaviour whe
 **down**: a routine read may serve the last-good copy, loudly logged; a consequential one
 re-raises. Where the entitlement *is* the control, degrading to a stale answer is the wrong
 direction.
+
+### The current token (C-078 §5)
+
+Auth's trust context names the session's **`current_jti`** — the token its last refresh minted.
+After the session is live, the resolver compares the token's `jti` with it
+(`check_current_jti`). Two tunables on `AuthServiceResolver`:
+
+- `jti_staleness` (default **60 s**): the oldest trust context the check may rely on. ⚠ The
+  last-good copy can be 900 s old; it never carries the check.
+- `strict_current_jti` (default **off**): the rollout switch (RUL-265 Q-J8). Turn it on once
+  auth emits `current_jti`.
+
+| case | lenient (default) | strict |
+|---|---|---|
+| `jti == current_jti` | pass | pass |
+| `jti != current_jti` | **`401 PLAT0108`** (`TokenSuperseded`) | **`401 PLAT0108`** |
+| context older than `jti_staleness` (the last-good copy) | log, pass | `503 PLAT0302` — the dependency failed; the token is not proven wrong |
+| feed carries no `current_jti` field | log, pass | `503 PLAT0302` — strict before auth deployed |
+| `current_jti` is null (a session last minted before auth's column existed) | log, pass | `401 PLAT0108` — a refresh mints a token auth names |
+| principal has no `jti` | `401 PLAT0101` when there is a `current_jti` to compare | `401 PLAT0101` |
+
+`PLAT0108`, not `PLAT0101`: the client refreshes, or retries with the token it already holds (a
+request racing its own refresh); `PLAT0101` would log the user out. Under strict, an outage no
+longer degrades a routine read to the last-good copy — the check cannot be made against it.
 
 ---
 

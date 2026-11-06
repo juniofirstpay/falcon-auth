@@ -21,7 +21,11 @@ break for two services, and doing it inside a port would make the port unauditab
 The mapping a host is expected to apply -- statuses and codes from the platform register
 (`registry/PLAT.md`):
 
-    Unauthenticated   -> 401 PLAT0101   no token, or the authn hook never ran
+    Unauthenticated   -> 401 PLAT0101   no token, or the authn hook never ran, or an invalid one:
+                                        a floor claim missing, an over-long lifetime (C-078 §6)
+    TokenExpired      -> 401 PLAT0108   ours, and expired alone: the client REFRESHES (RUL-175)
+    TokenSuperseded   -> 401 PLAT0108   ours, but not the session's current token (C-078 §5).
+                                        A TokenExpired
     CapabilityDenied  -> 403 PLAT0102   authenticated, lacks the capability. Do not retry. Both
                                         planes since C-055 (`PLAT0105` retired)
     SessionMiss       -> 403 PLAT0106   the session is dead/unknown -- still a DENY, see below
@@ -81,6 +85,7 @@ __all__ = (
     "StepUpRequired",
     "SubjectNotReachable",
     "TokenExpired",
+    "TokenSuperseded",
     "Unauthenticated",
     "UpstreamBadResponse",
     "UpstreamTimeout",
@@ -120,6 +125,19 @@ class TokenExpired(Unauthenticated):
     and retry; ``PLAT0101`` means sign in again (RUL-072: resource services verify locally, so
     they are the ones who can tell). A subclass, so a host catching ``Unauthenticated`` still
     catches it.
+    """
+
+    plat_code: ClassVar[str] = "PLAT0108"
+
+
+class TokenSuperseded(TokenExpired):
+    """The token verifies, but is not the session's CURRENT token: its ``jti`` is not the trust
+    context's ``current_jti`` -- a refresh has superseded it (C-078 §5).
+
+    ``401 PLAT0108``, the same row as expiry, by C-078 §6: the client refreshes, or retries with
+    the token it already holds (a request racing its own refresh). ⛔ Not ``PLAT0101``, which
+    logs the user out. A subclass of :class:`TokenExpired`, so a host mapping that already maps
+    this; its own class so a log line and a test can tell the two apart.
     """
 
     plat_code: ClassVar[str] = "PLAT0108"

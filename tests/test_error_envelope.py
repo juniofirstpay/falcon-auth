@@ -42,6 +42,7 @@ from falcon_auth.errors import (
     SessionMiss,
     StepUpRequired,
     TokenExpired,
+    TokenSuperseded,
     Unauthenticated,
 )
 from falcon_auth.identity.jwks import InvalidToken
@@ -93,6 +94,7 @@ def test_an_empty_extras_is_omitted():
     [
         (Unauthenticated("no token"), 401, "PLAT0101", None),
         (TokenExpired("exp passed"), 401, "PLAT0108", None),
+        (TokenSuperseded("refreshed since"), 401, "PLAT0108", None),
         (CapabilityDenied("held nothing", capability="kyc:read"), 403, "PLAT0102",
          {"capability": "kyc:read"}),
         (SessionMiss("revoked"), 403, "PLAT0106", None),

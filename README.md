@@ -85,12 +85,13 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 654 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 710 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
 | `eastwest/` | verifier · errors · mtls |
-| `identity/` | JWKS store, verifier, Falcon authenticator |
+| `identity/` | JWKS store, verifier, Falcon authenticator; C-078 §5's verifier rules (#41): the required claims are a floor — `iat` `exp` `sub` `sid` `jti`, a consumer may add, never remove — a missing one `401 PLAT0101` at verification; a tunable lifetime ceiling (`max_token_lifetime`, 3600 s) and leeway (30 s) |
+| `entitlement/resolver.py` · current token | C-078 §5 (#41): a token whose `jti` is not the trust context's `current_jti` is `401 PLAT0108` (`TokenSuperseded`), against a context at most `jti_staleness` (60 s) old; lenient while the feed names no current token, `strict_current_jti=True` once auth does |
 | `adapters/authenticators.py` | configured credentials — `Selector`, `JWTAuthenticator` · `ReferenceAuthenticator` · `MTLSAuthenticator` · `HMACAuthenticator` · `CustomAuthenticator`, and a declared binding (`PROVEN_AT_PERIMETER`) for `DPoP` tokens (#6); a CALLBACK source's HMAC over the exact body bytes, `401 PLAT0111` missing or wrong, `PLAT0112` stale (C-031, #1 A7) |
 | `trustcontext.py` · `errors.py` · `principal.py` | one call to auth, read by two layers |
 | `assurance/` | the elevation-window gate, and the per-operation challenge gate |
