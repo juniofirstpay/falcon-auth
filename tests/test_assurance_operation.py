@@ -7,6 +7,7 @@ there is no `before` hook for this, and why a test asserts there isn't one.
 """
 
 import json
+import re
 
 import falcon
 import falcon.asgi
@@ -308,7 +309,9 @@ async def test_the_verifier_posts_the_user_ref_and_no_version_header():
     out = await verifier.verify("sess-1", "op-1", user_ref="user-1")
 
     assert seen["path"] == "/v1/internal/sessions/sess-1/operations/op-1:verify"
-    assert seen["headers"] == {"Content-Type": "application/json"}, "no X-API-Version"
+    assert "X-API-Version" not in seen["headers"]
+    assert seen["headers"]["Content-Type"] == "application/json"
+    assert re.fullmatch(r"[0-9a-f]{32}", seen["headers"]["Idempotency-Key"]), "#45"
     assert json.loads(seen["data"]) == {"user_ref": "user-1"}, "user_ref rides in the BODY"
     assert "json" not in seen, "bytes, so a host's own session wrapper takes it (C-064 §4)"
     assert out.consumed_at == "2026-08-07T10:22:45Z"

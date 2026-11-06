@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import secrets
 from collections.abc import Callable
 from typing import Any, ClassVar, Protocol
 
@@ -316,8 +317,14 @@ class HttpOperationVerifier:
         )
         try:
             session = self._session_getter()
+            # falcon-auth#45: auth runs its idempotency hook on :verify before anything else and
+            # refuses a request with no key (400 PLAT0009). A FRESH key per call -- never the
+            # consumer's own request key, never reused: a step-up is single-use, so a repeated
+            # verify must reach auth and meet the consumed challenge (410), not replay a stored
+            # 200 and spend one challenge twice.
+            headers = {**self._headers, "Idempotency-Key": _fresh_idempotency_key()}
             async with outbound.post(
-                session, path, body={"user_ref": user_ref}, headers=self._headers
+                session, path, body={"user_ref": user_ref}, headers=headers
             ) as response:
                 await outbound.refuse_redirect(response, call="operation-verify")
                 if response.status == 200:
@@ -350,7 +357,7 @@ class HttpOperationVerifier:
             body = None
         code = _operation_error_code(body)
 
-        if response.status == 410 or code == AUTH_CODE_OPERATION_MISS:
+        if response.status == 410 or code in (AUTH_CODE_OPERATION_MISS, "AUTH8501"):
             # Uniform by design: unknown, unpassed, expired and consumed are indistinguishable
             # here, so challenge state does not leak. NOT a retry -- a new challenge is needed.
             raise OperationChallengeMiss(
@@ -365,21 +372,48 @@ class HttpOperationVerifier:
                 status=response.status,
             )
             raise AuthzMisconfigured("this service is not entitled to verify step-up operations")
+        if response.status == 400 and code in _OUR_REQUEST_REFUSED:
+            # A missing or malformed Idempotency-Key, or a body auth won't take: every input to
+            # this call is ours, not the user's, so this is a fault in this service (or in this
+            # package) -- not an unusable answer from auth.
+            await logger.aerror(
+                "operation-verify refused our request as malformed -- a client bug",
+                status=response.status, code=code, body=body,
+            )
+            raise AuthzMisconfigured(f"operation-verify: auth refused our request ({code})")
         await logger.aerror(
             "operation-verify error response", status=response.status, code=code, body=body
         )
         raise outbound.status_failure(response.status, call="operation-verify")
 
 
-def _operation_error_code(body: Any) -> int | None:
-    """auth's error envelope is `{"code": n}` or `{"error": {"code": n}}` -- accept both."""
+#: auth's 400s from :verify that can only mean OUR request was wrong: ``PLAT0009`` no
+#: Idempotency-Key, ``PLAT0001`` a key or body that fails auth's shape check (falcon-auth#45).
+#: A bad operation id is not among them -- auth answers that as the uniform miss.
+_OUR_REQUEST_REFUSED = frozenset({"PLAT0009", "PLAT0001"})
+
+
+def _fresh_idempotency_key() -> str:
+    """32 hex characters, inside auth's ``^[A-Za-z0-9_-]{16,64}$`` (C-013, RUL-027), from the
+    OS CSPRNG -- so no two verifies share one."""
+    return secrets.token_hex(16)
+
+
+def _operation_error_code(body: Any) -> int | str | None:
+    """auth's error envelope is `{"code": ...}` or `{"error": {"code": ...}}` -- accept both.
+
+    auth's codes are strings (``"PLAT0009"``, ``"AUTH8501"``); a bare number still reads as one.
+    """
     if not isinstance(body, dict):
         return None
     raw = body.get("code")
     if raw is None:
         nested = body.get("error")
         raw = nested.get("code") if isinstance(nested, dict) else None
-    try:
-        return int(raw) if raw is not None else None
-    except (TypeError, ValueError):
+    if isinstance(raw, bool):
         return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        return int(raw) if raw.isdigit() else raw
+    return None
