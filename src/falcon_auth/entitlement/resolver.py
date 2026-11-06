@@ -92,8 +92,9 @@ DEFAULT_SESSION_CLAIM = "sid"
 JTI_CLAIM = "jti"
 
 #: C-078 §5 / RUL-264 Q-J5: the oldest trust context, in seconds, the current-token check may rely
-#: on. Default 60. ⚠ The last-good copy is up to 900 s old (`DEFAULT_LAST_GOOD_TTL`), so it is
-#: never good enough for this check.
+#: on. Default 60. It also bounds the routine copy (`TrustContextCache.routine_ttl`), so a longer
+#: routine TTL never weakens the check. ⚠ The last-good copy served in an outage can be up to
+#: 900 s old (`DEFAULT_LAST_GOOD_TTL`); the check judges it by the age `_context` returns.
 DEFAULT_JTI_STALENESS = 60.0
 
 
@@ -116,11 +117,14 @@ class AuthenticatedUser(Protocol):
 
 
 class Resolver(Protocol):
-    async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal: ...
+    async def resolve(
+        self, user: AuthenticatedUser, *, consequential: bool = False, fresh: bool = False
+    ) -> Principal: ...
 
 
 class AuthServiceResolver:
-    """Resolves against the trust source, with the §10 caching and availability posture."""
+    """Resolves against the trust source: fresh for consequential, cached within a TTL for routine,
+    last-good for routine when the source is down (C-017, C-079 §6 and §8)."""
 
     def __init__(
         self,
@@ -135,9 +139,10 @@ class AuthServiceResolver:
     ) -> None:
         """
         :param jti_staleness: the oldest trust context, seconds, the current-token check relies
-            on (C-078 §5, default 60). Older -- today only the last-good copy served during an
-            outage -- and the check cannot be made: lenient, it logs and passes; strict, it is
-            ``AuthzUnavailable`` (503), never a 401, because the token is not proven wrong.
+            on (C-078 §5, default 60). It also caps the routine cache read. Older -- only a
+            last-good copy served during an outage can be -- and the check cannot be made:
+            lenient, it logs and passes; strict, it is ``AuthzUnavailable`` (503), never a 401,
+            because the token is not proven wrong.
         :param strict_current_jti: the rollout switch (RUL-265 Q-J8). Off (lenient): a feed with
             no ``current_jti`` logs and passes. On -- once auth emits the field -- the check must
             be made: see :func:`check_current_jti` for what a missing ``current_jti`` answers.
@@ -159,16 +164,23 @@ class AuthServiceResolver:
         self._jti_staleness = jti_staleness
         self._strict_current_jti = strict_current_jti
 
-    async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
+    async def resolve(
+        self, user: AuthenticatedUser, *, consequential: bool = False, fresh: bool = False
+    ) -> Principal:
         """Resolve `user` to a `Principal`.
 
-        `consequential` marks an operation for which the entitlement *is* the control. Every read
-        is fresh now -- C6 removed the warm path -- so what the flag selects is what happens when
-        the source is DOWN: a consequential operation fails closed, a routine one may serve the
-        last-good copy. Nothing sets it until a service classifies its own operations.
+        `consequential` marks an operation for which the entitlement *is* the control (C-017): its
+        trust context is read FRESH, and when the source is down it fails closed. A routine one
+        may be served the cached copy within the cache's `routine_ttl`, and the last-good copy
+        when the source is down (C-079 §6, §8).
+
+        `fresh` forces a fresh read for a routine operation too (C-079 §6: a service "may always
+        pull fresh"). It bypasses the routine copy only; what happens when the source is DOWN is
+        still the consequence class's to decide -- pass `consequential=True` to fail closed.
 
         Then the current-token check (C-078 §5, :func:`check_current_jti`), against a context no
-        older than ``jti_staleness``.
+        older than ``jti_staleness``: the routine copy is bounded by it too, so a ``routine_ttl``
+        above ``jti_staleness`` never weakens the check (falcon-auth#42 row 4).
         """
         session_ref = user.get(self._session_claim)
         if not session_ref:
@@ -180,13 +192,31 @@ class AuthServiceResolver:
 
         context, age = await self._context(
             str(session_ref), str(user.id), consequential=consequential,
-            max_age=self._jti_staleness,
+            max_age=0.0 if fresh else self._jti_staleness,
         )
         _assert_session_live(context)
-        await check_current_jti(
-            user.get(JTI_CLAIM), context, age=age,
-            jti_staleness=self._jti_staleness, strict=self._strict_current_jti,
-        )
+        try:
+            await check_current_jti(
+                user.get(JTI_CLAIM), context, age=age,
+                jti_staleness=self._jti_staleness, strict=self._strict_current_jti,
+            )
+        except TokenSuperseded:
+            if age <= 0:
+                raise
+            # A mismatch against a COPY proves only that the two differ, not which is newer: a
+            # client that refreshed after the copy was written holds a token the copy has never
+            # heard of. Superseded is auth's answer to give, so ask it once, fresh -- as a
+            # consequential read, so an outage now is 503 (C-066 §2: indeterminate, never a guess)
+            # rather than a refusal of a token that may be the current one. The fresh read
+            # rewrites the copy, so the next request is served from it again.
+            context, age = await self._context(
+                str(session_ref), str(user.id), consequential=True, max_age=0.0,
+            )
+            _assert_session_live(context)
+            await check_current_jti(
+                user.get(JTI_CLAIM), context, age=age,
+                jti_staleness=self._jti_staleness, strict=self._strict_current_jti,
+            )
         return self._principal(context)
 
     def _principal(self, context: TrustContext) -> Principal:
@@ -216,42 +246,64 @@ class AuthServiceResolver:
 
     # ── §10: freshness, and what happens when the source is down ─────────────────
 
-    async def _context(self, session_ref: str, user_ref: str, *, consequential: bool,
-                       max_age: float | None = None) -> tuple[TrustContext, float]:
-        """The context, and its AGE in seconds: ``0.0`` for a fresh read, ``math.inf`` for the
-        last-good copy (its age is not recorded). ``max_age`` -- never serve a cached copy older
-        than it -- is accepted and not acted on: with no warm path, the only cached copy is the
-        last-good one, and the age it reports lets the caller refuse to rely on it."""
-        # No warm path. Assurance is live (C-038/RUL-072): a cached trust level is one a demoted
-        # device can keep transacting behind for the length of the window. `consequential` still
-        # governs what happens when the source is DOWN, below -- it no longer selects between a
-        # cached read and a fresh one, because there is no cached read to select.
+    async def _context(
+        self, session_ref: str, user_ref: str, *, consequential: bool,
+        max_age: float | None = None,
+    ) -> tuple[TrustContext, float]:
+        """The session's trust context, and its age in seconds.
+
+        The age is ``0.0`` for a fresh fetch, the real age of a cached or last-good copy, and
+        ``math.inf`` when unknown (a copy written by 0.9.x).
+
+        ``max_age`` tightens the ROUTINE read only: a cached copy is served while younger than
+        ``min(routine_ttl, max_age)``; ``0`` forces a fresh read. It does not bound the
+        last-good copy -- that is the outage path, and the caller judges it by the age returned.
+        """
+        if not consequential:
+            bound = self._cache.routine_ttl if max_age is None \
+                else min(self._cache.routine_ttl, max_age)
+            cached = await self._cached(session_ref) if bound > 0 else None
+            if cached is not None and cached[1] < bound:
+                return cached[0].project(), cached[1]
         try:
             context = await self._client.fetch(session_ref, user_ref=user_ref)
         except SessionMiss:
-            # Auth DENIED the session. Its last-good copy must not outlive the denial, or the
-            # next outage serves it again (falcon-auth#30).
+            # Auth DENIED the session. Its copy must not outlive the denial, or the next routine
+            # read serves it from cache, or the next outage serves it as last-good (falcon-auth#30).
             await self._forget(session_ref)
             raise
         except AuthzUnavailable:
             if consequential:
                 # The entitlement IS the control here. Fail closed.
                 raise
-            last_good = await self._cache.read_last_good(session_ref)
+            last_good = await self._cache.read(session_ref)
             if last_good is None:
                 raise
+            context, age = last_good
             await logger.awarning(
                 "trust source unreachable; serving last-good grants for a routine operation",
                 session_ref_hash=_ref_hash(session_ref),
+                age_s=None if math.isinf(age) else round(age, 1),
             )
-            return last_good.project(), math.inf
+            return context.project(), age
 
         if context.session_state == SESSION_STATE_ENABLED:
             await self._cache.write(context)
         else:
-            # Revoked, but answered 200 (see `_assert_session_live`): never a copy to fall back on.
+            # Revoked, but answered 200 (see `_assert_session_live`): never a copy to serve.
             await self._forget(session_ref)
         return context, 0.0
+
+    async def _cached(self, session_ref: str) -> tuple[TrustContext, float] | None:
+        """The routine copy, or None. A cache that fails is a miss: the read goes to auth."""
+        try:
+            return await self._cache.read(session_ref)
+        except Exception as e:  # noqa: BLE001 -- an optimisation failing must not refuse anyone
+            await logger.awarning(
+                "trust-context cache read failed; reading fresh",
+                session_ref_hash=_ref_hash(session_ref), error=str(e),
+            )
+            return None
 
     async def _forget(self, session_ref: str) -> None:
         try:
@@ -404,7 +456,9 @@ class GrantAllResolver:
         self._actor_type = actor_type
         self._actor_kind = actor_kind
 
-    async def resolve(self, user: AuthenticatedUser, *, consequential: bool = False) -> Principal:
+    async def resolve(
+        self, user: AuthenticatedUser, *, consequential: bool = False, fresh: bool = False
+    ) -> Principal:
         return Principal(
             user_ref=str(user.id),
             entitlements=list(self._entitlements),

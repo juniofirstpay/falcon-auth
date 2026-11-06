@@ -168,8 +168,9 @@ it with **`401 PLAT0108`** (`TokenSuperseded`, a `TokenExpired`): the client ref
 with the token it already holds — ⛔ not `PLAT0101`, which logs the user out. `jti` is always
 forwarded onto the principal for this, whatever `forwarded_claims` says.
 
-The check relies on a trust context at most `jti_staleness` old (default 60 s). The last-good copy
-served during an outage is older than that, so it never carries the check: see
+The check relies on a trust context at most `jti_staleness` old (default 60 s), and the routine
+cache is bounded by the same value. A last-good copy served during an outage carries the check only
+while it is younger than that: see
 [`ENTITLEMENT.md`](ENTITLEMENT.md) for what lenient and strict do then, and while auth's feed names
 no current token.
 

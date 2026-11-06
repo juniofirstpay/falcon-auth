@@ -384,13 +384,27 @@ async def test_lenient_a_principal_without_jti_is_refused_when_there_is_one_to_c
 # staleness: the check never leans on a copy older than jti_staleness
 
 
-async def test_a_fresh_read_has_age_zero_and_the_last_good_copy_age_infinity():
+class _Clock:
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _clocked(auth, **kw):
+    clock = _Clock()
+    return AuthServiceResolver(auth, TrustContextCache(_Mem(), clock=clock), **kw), clock
+
+
+async def test_a_fresh_read_has_age_zero_and_a_cached_copy_its_real_age():
     auth = _Auth("jti-1")
-    resolver = _resolver(auth)
+    resolver, clock = _clocked(auth)
     assert (await resolver._context("sess-1", "user-1", consequential=False))[1] == 0.0
+    clock.now += 600
     auth.down = True
     context, age = await resolver._context("sess-1", "user-1", consequential=False, max_age=60)
-    assert context.current_jti == "jti-1" and age == math.inf
+    assert context.current_jti == "jti-1" and age == 600
 
 
 async def test_resolve_asks_for_a_context_no_older_than_jti_staleness():
@@ -408,25 +422,122 @@ async def test_resolve_asks_for_a_context_no_older_than_jti_staleness():
     assert seen == [17]
 
 
-async def test_strict_the_last_good_copy_cannot_carry_the_check_so_an_outage_is_503():
+async def test_strict_an_old_last_good_copy_cannot_carry_the_check_so_an_outage_is_503():
     auth = _Auth("jti-1")
-    resolver = _resolver(auth, strict_current_jti=True)
+    resolver, clock = _clocked(auth, strict_current_jti=True)
     assert await resolver.resolve(_User(jti="jti-1"))              # control: auth up
+    clock.now += 61
     auth.down = True
     with pytest.raises(AuthzUnavailable) as e:
         await resolver.resolve(_User(jti="jti-1"))
     assert not isinstance(e.value, Unauthenticated)
 
 
-async def test_lenient_the_last_good_copy_still_serves_a_routine_operation():
-    """Its `current_jti` is up to 900 s old: a mismatch against it proves nothing, so the check
-    is skipped -- not answered PLAT0108 against a token that may simply be newer."""
+async def test_strict_a_young_last_good_copy_still_carries_the_check():
+    """The control for the test above: within `jti_staleness`, the copy is good enough."""
     auth = _Auth("jti-1")
-    resolver = _resolver(auth)
+    resolver, clock = _clocked(auth, strict_current_jti=True)
     await resolver.resolve(_User(jti="jti-1"))
+    clock.now += 30
+    auth.down = True
+    assert (await resolver.resolve(_User(jti="jti-1"))).session_ref == "sess-1"
+
+
+async def test_lenient_an_old_last_good_copy_still_serves_a_routine_operation():
+    """Its `current_jti` is minutes old: a mismatch against it proves nothing, so the check is
+    skipped -- not answered PLAT0108 against a token that may simply be newer."""
+    auth = _Auth("jti-1")
+    resolver, clock = _clocked(auth)
+    await resolver.resolve(_User(jti="jti-1"))
+    clock.now += 600
     auth.down = True
     p = await resolver.resolve(_User(jti="jti-2-newer"))
     assert p.session_ref == "sess-1"
+
+
+# ── the merge of #41 and #42: the routine copy and the current token ─────────────────
+
+
+class _CountingAuth(_Auth):
+    def __init__(self, current_jti=_ABSENT):
+        super().__init__(current_jti)
+        self.calls = 0
+
+    async def fetch(self, session_ref, *, user_ref):
+        self.calls += 1
+        return await super().fetch(session_ref, user_ref=user_ref)
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["lenient", "strict"])
+async def test_a_token_refreshed_after_the_copy_was_cached_is_not_refused(strict):
+    """The copy names jti-1; the client refreshes to jti-2. The copy is behind, the token is not
+    superseded: one fresh read settles it, and the copy is rewritten for the next request."""
+    auth = _CountingAuth("jti-1")
+    resolver, clock = _clocked(auth, strict_current_jti=strict)
+    await resolver.resolve(_User(jti="jti-1"))
+    auth.current_jti = "jti-2"                                   # auth's refresh
+    clock.now += 10
+    assert (await resolver.resolve(_User(jti="jti-2"))).session_ref == "sess-1"
+    assert auth.calls == 2, "one fresh read on the mismatch"
+    clock.now += 10
+    await resolver.resolve(_User(jti="jti-2"))
+    assert auth.calls == 2, "the rewritten copy serves the next request"
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["lenient", "strict"])
+async def test_a_superseded_token_is_still_refused_against_a_cached_copy(strict):
+    """The control: after the refresh, the OLD token is refused once auth confirms it."""
+    auth = _CountingAuth("jti-1")
+    resolver, clock = _clocked(auth, strict_current_jti=strict)
+    await resolver.resolve(_User(jti="jti-1"))
+    auth.current_jti = "jti-2"
+    clock.now += 10
+    await resolver.resolve(_User(jti="jti-2"))                   # the copy is now jti-2
+    clock.now += 10
+    with pytest.raises(TokenSuperseded):
+        await resolver.resolve(_User(jti="jti-1"))
+    assert auth.calls == 3, "refused after asking auth, not on the copy's word alone"
+
+
+async def test_a_mismatch_against_a_copy_during_an_outage_is_503_not_plat0108():
+    """The copy is behind or the token is old -- with auth down nobody can say which (C-066 §2)."""
+    auth = _Auth("jti-1")
+    resolver, clock = _clocked(auth)
+    await resolver.resolve(_User(jti="jti-1"))
+    clock.now += 10
+    auth.down = True
+    with pytest.raises(AuthzUnavailable) as e:
+        await resolver.resolve(_User(jti="jti-2"))
+    assert not isinstance(e.value, TokenSuperseded)
+
+
+async def test_a_long_routine_ttl_does_not_widen_the_current_token_window():
+    """#42 row 4: routine_ttl 600 s, jti_staleness 60 s -- a 120 s old copy is not served."""
+    auth = _CountingAuth("jti-1")
+    clock = _Clock()
+    resolver = AuthServiceResolver(
+        auth, TrustContextCache(_Mem(), clock=clock, routine_ttl=600), jti_staleness=60,
+    )
+    await resolver.resolve(_User(jti="jti-1"))
+    clock.now += 30
+    await resolver.resolve(_User(jti="jti-1"))
+    assert auth.calls == 1, "control: a 30 s copy is served from cache"
+    clock.now += 90
+    await resolver.resolve(_User(jti="jti-1"))
+    assert auth.calls == 2, "a 120 s copy is past jti_staleness: read fresh"
+
+
+async def test_a_feed_without_current_jti_stays_without_it_through_the_cache():
+    """Absent and null answer differently under strict; a cache round-trip must not turn one
+    into the other."""
+    resolver, _ = _clocked(_Auth())
+    await resolver.resolve(_User(jti="jti-1"))
+    cached, _age = await resolver._cache.read("sess-1")
+    assert "current_jti" not in cached.model_fields_set
+    resolver, _ = _clocked(_Auth(None))
+    await resolver.resolve(_User(jti="jti-1"))
+    cached, _age = await resolver._cache.read("sess-1")
+    assert "current_jti" in cached.model_fields_set and cached.current_jti is None
 
 
 @pytest.mark.parametrize("strict", [False, True], ids=["lenient", "strict"])

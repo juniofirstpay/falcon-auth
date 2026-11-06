@@ -85,7 +85,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 
 ## Status
 
-**Everything the package owes is built, at 710 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
+**Everything the package owes is built, at 751 tests**, except what #11 still lists. East-west is ported behaviour-identical from `falcon-svcplane` with its own tests as the correctness check; identity and entitlement are ports of code already running in two services; assurance, the plane vocabulary and the plane middleware are written from scratch.
 
 | Landed | |
 |---|---|
@@ -98,7 +98,7 @@ The engine is not a choice: casbin is a mandated stack element and the model tex
 | `entitlement/` | resolver · enforcer · the capability gate · the flatness and grant-register checks · actor types and grant kinds (C-052, C-053) |
 | `planes.py` · `adapters/routing.py` · `adapters/middleware.py` | one plane per endpoint, exactly one credential per route, `CLIENT` refused, and the wrong-plane `404 PLAT0006` over I/O-free credentials only (C-060, #11); every path opens with `/v<n>/` or refuses to mount, `/.well-known/` aside, with a vendor-held callback URL served as `alias_of=` its versioned twin until the vendor moves (C-039, RUL-135; #1 A9); `verify_app` returns the advisory route-table lint, plane prefix, casing and `mock` (C-051, C-068; RUL-206, #38) |
 
-**C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and assurance served live rather than from a cache window.
+**C-038 conformance is complete**: the platform model text, the `g` layer as policy data, the any-of capability registry, per-grant first-match evaluation, the flatness lint, the grant-register boot check, and trust-context freshness by consequence class (C-017, C-079 §6): consequential reads fresh, routine reads from a cached copy within a tunable TTL (default 60 s), and `fresh=True` to force a fresh read anywhere. Step-up always reads live.
 
 **Still owed:** nothing in the package until auth emits grants. The expansion stays empty and the grant register stays empty until it does — by design, not by omission.
 

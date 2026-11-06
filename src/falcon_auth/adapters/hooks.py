@@ -379,6 +379,7 @@ def require(
     capability: str,
     *,
     consequential: bool = False,
+    fresh: bool = False,
     user_attr: str = "user",
 ) -> HookFn:
     """Gate a user-plane route on `capability` -- with C-052's actor type and C-053's grant kinds.
@@ -406,10 +407,14 @@ def require(
     ownership check and idempotency key, H3, H6), and ``opened_by`` / ``opened_by_delegation`` for
     the audit line (H7). A request carrying ``Subject-Ref`` answers ``Vary: Subject-Ref`` (H5).
 
-    `consequential` marks an operation for which the entitlement is the control. Every trust read
-    is fresh regardless; what this selects is the behaviour when the source is DOWN -- fail closed
-    rather than serve the last-good copy. Nothing sets it until a service classifies its own
-    operations.
+    `consequential` marks an operation for which the entitlement is the control (C-017): its trust
+    context is read fresh, and when the source is DOWN it fails closed rather than serve the
+    last-good copy. A routine route may be served a cached trust context within the cache's
+    ``routine_ttl`` (C-079 §6). Each service classifies its own operations.
+
+    `fresh` forces a fresh trust-context read on a routine route too (C-079 §6: a service "may
+    always pull fresh"). It is passed to the resolver only when set, so a host's own resolver that
+    predates it keeps working on every route that does not ask for it.
     """
     _bind(enforcer, "knows", param="enforcer", factory="require")
     _bind(resolver, "resolve", param="resolver", factory="require")
@@ -426,6 +431,10 @@ def require(
             "and C-053's kind rule cannot be applied, and a delegated grant would count as the "
             "caller's own"
         )
+
+    resolve_kw: dict[str, bool] = {"consequential": consequential}
+    if fresh:
+        resolve_kw["fresh"] = True
 
     async def hook(
         req: Any, resp: Any, resource: Any, params: dict[str, Any], *_a: Any, **_kw: Any
@@ -450,7 +459,7 @@ def require(
                 "PlaneAuthenticationMiddleware"
             )
 
-        principal = await resolver.resolve(user, consequential=consequential)
+        principal = await resolver.resolve(user, **resolve_kw)
         subject_header = req.get_header(SUBJECT_REF_HEADER)
         if subject_header is not None:
             resp.append_header("Vary", SUBJECT_REF_HEADER)          # H5

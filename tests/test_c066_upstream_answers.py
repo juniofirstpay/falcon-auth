@@ -191,7 +191,7 @@ class _Auth:
 async def test_a_routine_operation_still_gets_the_last_good_copy(failure):
     """C-017, as the authority kept it: 504 and 502 are 'auth gave no usable answer'."""
     auth = _Auth()
-    resolver = AuthServiceResolver(auth, TrustContextCache(_Mem()))
+    resolver = AuthServiceResolver(auth, TrustContextCache(_Mem(), routine_ttl=0))  # the outage path, not the routine copy
     await resolver.resolve(_User())
     auth.next = failure
     with capture_logs():
@@ -202,7 +202,7 @@ async def test_a_routine_operation_still_gets_the_last_good_copy(failure):
 
 async def test_a_misconfiguration_is_never_hidden_behind_the_copy():
     auth = _Auth()
-    resolver = AuthServiceResolver(auth, TrustContextCache(_Mem()))
+    resolver = AuthServiceResolver(auth, TrustContextCache(_Mem(), routine_ttl=0))  # the outage path, not the routine copy
     await resolver.resolve(_User())
     auth.next = AuthzMisconfigured("403")
     with pytest.raises(AuthzMisconfigured):
